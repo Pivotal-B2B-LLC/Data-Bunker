@@ -47,7 +47,37 @@
       <div class="panel-icon">🔍</div>
       <p class="panel-title">Navigate to a page to scrape</p>
       <p class="panel-sub">Open LinkedIn search, Apollo, Google Maps, Yelp, or any business directory.</p>
-      <a href="https://www.linkedin.com/search/results/people/" target="_blank" class="btn btn-outline" style="display:inline-block;flex:none;padding:7px 14px">Open LinkedIn Search ↗</a>
+      <div style="display:flex;flex-direction:column;gap:6px;align-items:center">
+        <a href="https://www.linkedin.com/search/results/people/" target="_blank" class="btn btn-outline" style="display:inline-block;flex:none;padding:7px 14px">💼 LinkedIn Search ↗</a>
+        <a href="https://app.apollo.io/#/people" target="_blank" class="btn btn-outline" style="display:inline-block;flex:none;padding:7px 14px">🚀 Apollo.io People ↗</a>
+        <a href="https://www.google.com/maps" target="_blank" class="btn btn-outline" style="display:inline-block;flex:none;padding:7px 14px">🗺️ Google Maps ↗</a>
+      </div>
+    </div>
+
+    <!-- ═══ QUEUE PANEL (always visible at top when queue has items) ═══ -->
+    <div id="queuePanel" class="panel hidden" style="padding:10px 14px;border-bottom:1px solid var(--border)">
+      <div class="section-label" style="margin-bottom:6px">SCRAPE QUEUE</div>
+      <div style="display:flex;gap:6px;margin-bottom:8px">
+        <input id="queueUrlInput" type="url" placeholder="Paste URL and press Enter…"
+          style="flex:1;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg2);color:var(--text);font-size:11px;outline:none">
+        <button id="btnQueueAdd" class="btn btn-primary" style="flex:none;width:38px;padding:6px 0;font-size:12px">+</button>
+      </div>
+      <div id="queueList" style="max-height:140px;overflow-y:auto"></div>
+      <div style="display:flex;gap:6px;margin-top:6px">
+        <button id="btnQueueStart" class="btn btn-primary" style="flex:1;font-size:11px">▶ Start Queue</button>
+        <button id="btnQueueClear" class="btn" style="flex:none;padding:6px 12px;font-size:11px;background:var(--bg3);color:var(--dim)">Clear</button>
+      </div>
+      <div id="queueStatus" class="status-msg hidden" style="margin-top:6px;margin-bottom:0;font-size:11px"></div>
+    </div>
+
+    <!-- ═══ GO TO URL — paste a link and scrape it ═══ -->
+    <div id="goUrlSection" class="panel" style="padding:8px 14px;border-bottom:1px solid var(--border)">
+      <div style="display:flex;gap:6px;align-items:center">
+        <input id="goUrlInput" type="url" placeholder="Paste URL to scrape…"
+          style="flex:1;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg2);color:var(--text);font-size:11px;outline:none">
+        <button id="btnGoUrl" class="btn btn-teal" style="flex:none;width:60px;padding:6px 0;font-size:11px">Go ↗</button>
+        <button id="btnAddQueue" class="btn btn-outline" style="flex:none;width:24px;padding:6px 0;font-size:11px" title="Add to queue">+Q</button>
+      </div>
     </div>
 
     <!-- ═══ UNIVERSAL PANEL (any non-LinkedIn site) ═══ -->
@@ -66,6 +96,34 @@
       </div>
 
       <a id="dashLinkUniversal" href="http://localhost:3000/contacts" target="_blank" class="dash-link">View in Dashboard ↗</a>
+    </div>
+
+    <!-- ═══ APOLLO PANEL ═══ -->
+    <div id="apolloPanel" class="panel hidden">
+      <div class="section">
+        <div class="section-label">APOLLO.IO</div>
+        <p style="font-size:11px;color:var(--muted);margin-bottom:8px">Auto-scrape Apollo people search results across all pages.</p>
+      </div>
+
+      <div class="stats-row" style="grid-template-columns:repeat(3,1fr)">
+        <div class="stat-box"><div id="apSaved" class="stat-val accent">0</div><div class="stat-key">SAVED</div></div>
+        <div class="stat-box"><div id="apPages" class="stat-val">0</div><div class="stat-key">PAGES</div></div>
+        <div class="stat-box"><div id="apTotal" class="stat-val dim">?</div><div class="stat-key">TOTAL</div></div>
+      </div>
+
+      <div id="apStatus" class="status-msg">Ready — press Start to scrape Apollo</div>
+
+      <div class="controls">
+        <button id="btnApStart" class="btn btn-primary">▶  START</button>
+        <button id="btnApStop" class="btn btn-danger" disabled>⏹  STOP</button>
+      </div>
+
+      <div class="section" style="margin-top:4px">
+        <button id="btnApScan" class="btn btn-teal" style="width:100%;font-size:11px">🔍 Scan & Save This Page Only</button>
+        <div id="apSaveResult" class="save-result hidden"></div>
+      </div>
+
+      <a id="dashLinkApollo" href="http://localhost:3000/contacts" target="_blank" class="dash-link">View in Dashboard ↗</a>
     </div>
 
     <!-- ═══ LINKEDIN PANEL ═══ -->

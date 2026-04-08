@@ -183,7 +183,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 
   if (msg.action === 'START_AUTO') {
-    if (!isActive) runAuto().catch(e => reportError(e.message));
+    if (!isActive) {
+      const strategy = getStrategy();
+      if (strategy === 'apollo') {
+        runAutoApollo().catch(e => reportError(e.message));
+      } else {
+        runAuto().catch(e => reportError(e.message));
+      }
+    }
     sendResponse({ ok: true });
     return true;
   }
@@ -202,8 +209,8 @@ function buildState() {
     strategy: s, siteLabel: LABELS[s] || 'Page', url: location.href,
     isLinkedIn: s === 'linkedin', isSupported: true, isActive,
     leadsOnPage: pageLeads.length,
-    totalResults: s === 'linkedin' ? liTotalResults() : 0,
-    currentPage: s === 'linkedin' ? liCurrentPage() : 0,
+    totalResults: s === 'linkedin' ? liTotalResults() : s === 'apollo' ? apolloTotalResults() : 0,
+    currentPage: s === 'linkedin' ? liCurrentPage() : s === 'apollo' ? apolloCurrentPage() : 0,
     filters: s === 'linkedin' ? liFilters() : {},
   };
 }
@@ -217,7 +224,7 @@ async function gatherBlocks() {
   const s = getStrategy();
   switch (s) {
     case 'linkedin':    return gatherLinkedIn();
-    case 'apollo':      return gatherCards('[class*="zp_"], tr[class*="zp_"]');
+    case 'apollo':      return gatherApollo();
     case 'maps':        return gatherMaps();
     case 'yelp':        return gatherCards('[class*="businessName"], [class*="container__09f24"]');
     case 'yellowpages': return gatherCards('.result, .listing, .info');
@@ -580,6 +587,245 @@ function walkUp(a) {
     if (el.querySelector?.('[class*="primary-subtitle"]')) return el;
   }
   return a.closest('li') || a.parentElement || a;
+}
+
+// ── Apollo.io ─────────────────────────────────────────────────────────────────
+function gatherApollo() {
+  const blocks = [], seen = new Set();
+  console.log('[Data Bunker] gatherApollo() — scanning DOM...');
+
+  // Apollo uses table rows in their people search (app.apollo.io/#/people)
+  const rows = document.querySelectorAll('tr[class*="zp_"]');
+  console.log('[Data Bunker] Apollo rows found:', rows.length);
+
+  for (const row of rows) {
+    const cells = row.querySelectorAll('td');
+    if (cells.length < 3) continue;
+
+    const rawText = (row.innerText || '').replace(/\s+/g, ' ').trim();
+    if (rawText.length < 10) continue;
+    const key = rawText.slice(0, 100);
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    let name = '', title = '', company = '', email = '', phone = '', location = '', linkedinUrl = '';
+
+    // Extract structured data from cells
+    for (const cell of cells) {
+      const text = cell.textContent.trim();
+      if (!text || text.length < 2) continue;
+
+      const nameLink = cell.querySelector('a[href*="/people/"], a[href*="#/contacts/"]');
+      if (nameLink && !name) { name = cleanName(nameLink.textContent.trim()); continue; }
+
+      const emailEl = cell.querySelector('[data-cy-id*="email"], a[href^="mailto:"]');
+      if (emailEl) {
+        const mailto = emailEl.getAttribute('href');
+        if (mailto) email = mailto.replace('mailto:', '').trim();
+        else email = emailEl.textContent.trim();
+      }
+      const emailMatch = text.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/);
+      if (emailMatch && !email) email = emailMatch[0];
+
+      const phoneMatch = text.match(/[\+]?[\d][\d\s\-().]{6,16}[\d]/);
+      if (phoneMatch && !phone) phone = phoneMatch[0].trim();
+
+      const liLink = cell.querySelector('a[href*="linkedin.com/in/"]');
+      if (liLink) linkedinUrl = liUrl(liLink.href) || liLink.href;
+    }
+
+    if (!title) {
+      const titleEl = row.querySelector('[class*="zp_Y6y8d"], [class*="contact_title"], [data-cy-id*="title"]');
+      if (titleEl) title = titleEl.textContent.trim();
+    }
+    if (!company) {
+      const compEl = row.querySelector('[class*="zp_J1j17"], [data-cy-id*="company"], a[href*="/companies/"], a[href*="#/accounts/"]');
+      if (compEl) company = compEl.textContent.trim();
+    }
+    if (!location) {
+      const locMatch = rawText.match(/(?:,\s*)?([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*,\s*[A-Z]{2}(?:\s*\d{5})?)/);
+      if (locMatch) location = locMatch[1];
+    }
+
+    // Fallback: extract from innerText lines
+    if (!name || !title) {
+      const lines = (row.innerText || '').split('\n').map(l => l.trim()).filter(l => l.length > 1);
+      if (!name && lines[0]) name = cleanName(lines[0]);
+      if (!title && lines[1]) title = lines[1];
+      if (!company && lines[2]) company = lines[2];
+    }
+
+    if (!name) continue;
+
+    blocks.push({
+      name, subtitle: title, company, email, phone, location,
+      profileUrl: linkedinUrl, rawText: rawText.slice(0, 800),
+      type: 'apollo_card'
+    });
+  }
+
+  // Fallback: card-based layout
+  if (blocks.length === 0) {
+    console.log('[Data Bunker] No table rows — trying card selectors');
+    const cards = document.querySelectorAll('[class*="zp_"], [class*="contact-row"], [data-cy-id*="contact"]');
+    for (const card of cards) {
+      const text = (card.innerText || '').trim();
+      if (text.length < 15) continue;
+      const ck = text.slice(0, 100);
+      if (seen.has(ck)) continue;
+      seen.add(ck);
+      const em = text.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/);
+      const ph = text.match(/[\+]?[\d][\d\s\-().]{6,16}[\d]/);
+      const lk = card.querySelector('a[href*="linkedin.com/in/"]');
+      blocks.push({ rawText: text.slice(0, 800), email: em?.[0] || '', phone: ph?.[0]?.trim() || '', profileUrl: lk ? lk.href : '', type: 'apollo_card' });
+    }
+  }
+
+  // Last fallback: generic card approach
+  if (blocks.length === 0) {
+    console.log('[Data Bunker] Apollo fallback — using generic card approach');
+    return gatherCards('[class*="zp_"], tr[class*="zp_"]');
+  }
+
+  console.log('[Data Bunker] gatherApollo() TOTAL:', blocks.length, 'leads');
+  return blocks;
+}
+
+// ── Apollo Helpers ─────────────────────────────────────────────────────────────
+function apolloTotalResults() {
+  for (const el of document.querySelectorAll('span, div, p')) {
+    const t = el.textContent.trim();
+    const m = t.match(/(?:of|total)\s+([\d,]+)/i) || t.match(/([\d,]+)\s+(?:people|contacts|results)/i);
+    if (m) { const n = parseInt(m[1].replace(/,/g, '')); if (n > 0) return n; }
+  }
+  return 0;
+}
+
+function apolloCurrentPage() {
+  const hash = location.hash || '';
+  const m = hash.match(/[?&]page=(\d+)/);
+  return m ? parseInt(m[1]) : 1;
+}
+
+async function nextPageApollo() {
+  const current = apolloCurrentPage();
+  const nextNum = current + 1;
+  console.log('[Data Bunker] Apollo nextPage() — page', current, '→', nextNum);
+
+  const url = new URL(location.href);
+  let hash = url.hash || '#/people';
+  if (hash.includes('page=')) {
+    hash = hash.replace(/page=\d+/, 'page=' + nextNum);
+  } else {
+    hash += (hash.includes('?') ? '&' : '?') + 'page=' + nextNum;
+  }
+  const nextUrl = location.origin + location.pathname + location.search + hash;
+  console.log('[Data Bunker] Apollo next URL:', nextUrl);
+
+  navPending = true;
+  stopFlag = true;
+
+  const currentStats = await chrome.storage.local.get('scraperStats').catch(() => ({}));
+  await chrome.storage.local.set({
+    scraperStats: { ...currentStats?.scraperStats, status: 'running', lastUpdate: Date.now() },
+    pendingAutoStart: true
+  }).catch(() => {});
+
+  chrome.runtime.sendMessage({ type: 'NAV_TO_URL', url: nextUrl }).catch(() => {});
+  await sleep(3000);
+  if (apolloCurrentPage() === current) {
+    window.location.href = nextUrl;
+  }
+  return false;
+}
+
+// ── Apollo Auto-Scraper ───────────────────────────────────────────────────────
+async function runAutoApollo() {
+  isActive = true; stopFlag = false;
+  console.log('[Data Bunker] runAutoApollo() started — URL:', location.href);
+
+  const stored = await chrome.storage.local.get('scraperStats').catch(() => ({}));
+  const prev = stored?.scraperStats || {};
+  let pages = (prev.status === 'running') ? (prev.pagesProcessed || 0) : 0;
+  let saved = (prev.status === 'running') ? (prev.totalSaved || 0) : 0;
+  const seenKeys = new Set();
+
+  chrome.runtime.sendMessage({ type: 'SCRAPING_STARTED' }).catch(() => {});
+
+  let consecutiveEmpty = 0;
+  const MAX_EMPTY = 3;
+  const MAX_PAGES = 200;
+
+  try {
+    while (!stopFlag && pages < MAX_PAGES) {
+      const pn = apolloCurrentPage();
+      console.log('[Data Bunker] ═══ Apollo page', pn, '═══');
+
+      const hasResults = await waitFor(() => {
+        return document.querySelectorAll('tr[class*="zp_"], [class*="zp_"]').length >= 2;
+      }, 25000);
+
+      if (!hasResults) {
+        console.log('[Data Bunker] No Apollo results loaded — end');
+        break;
+      }
+      if (stopFlag) break;
+
+      await humanScroll();
+      if (stopFlag) break;
+      await sleep(1500 + Math.random() * 1000);
+      if (stopFlag) break;
+
+      const blocks = gatherApollo();
+      const newBlocks = blocks.filter(b => {
+        const k = (b.name + '|' + (b.email || b.profileUrl || b.rawText?.slice(0, 50)));
+        if (seenKeys.has(k)) return false;
+        seenKeys.add(k);
+        return true;
+      });
+
+      pageLeads = blocks;
+      const total = apolloTotalResults();
+      progress({ pagesProcessed: pages, totalSaved: saved, pageNum: pn, totalResults: total, detectedThisPage: blocks.length, newThisPage: newBlocks.length });
+
+      let pageSaved = 0;
+      if (newBlocks.length > 0) {
+        consecutiveEmpty = 0;
+        try {
+          const r = await fetch(API + '/api/scraper/leads', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ blocks: newBlocks, url: location.href, strategy: 'apollo', source: 'apollo_auto' }),
+            signal: AbortSignal.timeout(60000)
+          });
+          const d = await r.json();
+          pageSaved = (d.saved || 0) + (d.updated || 0);
+          saved += pageSaved;
+          console.log('[Data Bunker] ✅ Apollo page', pn, '— saved', pageSaved, '(total:', saved, ')');
+        } catch (e) {
+          console.error('[Data Bunker] ❌ Apollo save failed:', e.message);
+        }
+      } else {
+        consecutiveEmpty++;
+        console.log('[Data Bunker] ⚠️ Apollo page', pn, '— 0 new (' + consecutiveEmpty + '/' + MAX_EMPTY + ')');
+        if (consecutiveEmpty >= MAX_EMPTY) break;
+      }
+
+      pages++;
+      progress({ pagesProcessed: pages, totalSaved: saved, pageNum: pn, totalResults: total, pageSaved });
+
+      const delay = 2000 + Math.random() * 3000;
+      await sleep(delay);
+      if (stopFlag) break;
+
+      if (!(await nextPageApollo())) break;
+    }
+  } finally { isActive = false; }
+
+  if (!navPending) {
+    console.log('[Data Bunker] 🏁 Apollo complete — pages:', pages, 'saved:', saved);
+    chrome.runtime.sendMessage({ type: 'SCRAPING_DONE', data: { pagesProcessed: pages, totalSaved: saved } }).catch(() => {});
+  }
+  navPending = false;
 }
 
 // ── Google Maps ───────────────────────────────────────────────────────────────

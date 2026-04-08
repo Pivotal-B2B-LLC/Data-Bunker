@@ -75,10 +75,14 @@ $('btnSaveServer').addEventListener('click', async () => {
 
 function fmt(n) { return Number(n || 0).toLocaleString(); }
 
+const settingsPanelEl = $('settingsPanel');
+const apolloPanel = $('apolloPanel');
+const queuePanel = $('queuePanel');
+
 function showPanel(name) {
   currentPanel = name;
-  [idlePanel, universalPanel, linkedinPanel].forEach(p => p.classList.add('hidden'));
-  ({ idle: idlePanel, universal: universalPanel, linkedin: linkedinPanel })[name]?.classList.remove('hidden');
+  [idlePanel, universalPanel, linkedinPanel, apolloPanel].forEach(p => p.classList.add('hidden'));
+  ({ idle: idlePanel, universal: universalPanel, linkedin: linkedinPanel, apollo: apolloPanel })[name]?.classList.remove('hidden');
 }
 
 // ── Auto-detect ───────────────────────────────────────────────────────────────
@@ -108,6 +112,8 @@ async function detect() {
       chrome.tabs.sendMessage(tab.id, { action: 'SCAN' }).then(r => {
         if (r?.count > 0) { detectedBar.classList.remove('hidden'); detectedLabel.textContent = r.count + ' leads detected on this page'; }
       }).catch(() => {});
+    } else if (state.strategy === 'apollo') {
+      showPanel('apollo');
     } else {
       showPanel('universal');
     }
@@ -256,4 +262,224 @@ async function checkServer() {
   await syncStorage();
   setInterval(syncStorage, 800);
   setInterval(checkServer, 8000);
+  await loadQueue();
 })();
+
+// ══════════════════════════════════════════════════════════════════════════════
+// GO TO URL — paste a URL, navigate to it, auto-start scraping
+// ══════════════════════════════════════════════════════════════════════════════
+const goUrlInput = $('goUrlInput');
+const btnGoUrl = $('btnGoUrl');
+const btnAddQueue = $('btnAddQueue');
+
+async function goToUrl(url) {
+  if (!url) return;
+  try { new URL(url); } catch { return; } // validate
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) return;
+  // Set pending auto-start so background.js restarts scraping after navigation
+  await chrome.storage.local.set({ pendingAutoStart: true, pendingTabId: tab.id });
+  await chrome.tabs.update(tab.id, { url });
+  window.close(); // close popup — scraping will start automatically
+}
+
+btnGoUrl.addEventListener('click', () => goToUrl(goUrlInput.value.trim()));
+goUrlInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    goToUrl(goUrlInput.value.trim());
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// QUEUE SYSTEM — add multiple URLs, process sequentially
+// ══════════════════════════════════════════════════════════════════════════════
+const queueUrlInput = $('queueUrlInput');
+const btnQueueAdd = $('btnQueueAdd');
+const btnQueueStart = $('btnQueueStart');
+const btnQueueClear = $('btnQueueClear');
+const queueListEl = $('queueList');
+const queueStatusEl = $('queueStatus');
+
+let queue = []; // [{url, status:'pending'|'active'|'done'|'failed', saved:0}]
+let queueRunning = false;
+
+async function loadQueue() {
+  const { scrapeQueue } = await chrome.storage.local.get('scrapeQueue');
+  if (scrapeQueue) queue = scrapeQueue;
+  renderQueue();
+}
+
+async function saveQueue() {
+  await chrome.storage.local.set({ scrapeQueue: queue });
+  renderQueue();
+}
+
+function renderQueue() {
+  if (queue.length === 0) {
+    queuePanel.classList.add('hidden');
+    return;
+  }
+  queuePanel.classList.remove('hidden');
+
+  queueListEl.innerHTML = queue.map((q, i) => {
+    const icon = q.status === 'done' ? '✅' : q.status === 'active' ? '⚡' : q.status === 'failed' ? '❌' : '⏳';
+    const cls = q.status === 'active' ? 'active' : q.status === 'done' ? 'done' : q.status === 'failed' ? 'failed' : '';
+    let label = '';
+    try { const u = new URL(q.url); label = u.hostname.replace('www.','') + u.pathname.slice(0,30); } catch { label = q.url.slice(0,40); }
+    if (q.saved) label += ` (${q.saved} saved)`;
+    return `<div class="q-item ${cls}"><span class="q-icon">${icon}</span><span class="q-url ${cls}" title="${q.url.replace(/"/g,'&quot;')}">${label}</span>${q.status === 'pending' ? `<button class="q-remove" data-idx="${i}">×</button>` : ''}</div>`;
+  }).join('');
+
+  // Remove button handlers
+  queueListEl.querySelectorAll('.q-remove').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const idx = parseInt(btn.dataset.idx);
+      queue.splice(idx, 1);
+      await saveQueue();
+    });
+  });
+
+  // Update start button
+  const pending = queue.filter(q => q.status === 'pending').length;
+  btnQueueStart.textContent = queueRunning ? '⟳ Running…' : `▶ Start Queue (${pending})`;
+  btnQueueStart.disabled = queueRunning || pending === 0;
+}
+
+function addToQueue(url) {
+  if (!url) return;
+  try { new URL(url); } catch { return; }
+  // Deduplicate
+  if (queue.some(q => q.url === url && q.status === 'pending')) return;
+  queue.push({ url, status: 'pending', saved: 0 });
+  saveQueue();
+}
+
+btnQueueAdd.addEventListener('click', () => { addToQueue(queueUrlInput.value.trim()); queueUrlInput.value = ''; });
+queueUrlInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); addToQueue(queueUrlInput.value.trim()); queueUrlInput.value = ''; }
+});
+btnAddQueue.addEventListener('click', () => { addToQueue(goUrlInput.value.trim()); goUrlInput.value = ''; });
+btnQueueClear.addEventListener('click', async () => { queue = []; await saveQueue(); });
+
+btnQueueStart.addEventListener('click', async () => {
+  if (queueRunning) return;
+  queueRunning = true;
+  renderQueue();
+  queueStatusEl.className = 'status-msg running'; queueStatusEl.classList.remove('hidden');
+  queueStatusEl.textContent = '⚡ Queue running…';
+
+  for (let i = 0; i < queue.length; i++) {
+    if (queue[i].status !== 'pending') continue;
+    queue[i].status = 'active';
+    await saveQueue();
+    queueStatusEl.textContent = `⚡ Processing ${i + 1}/${queue.length}…`;
+
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tab?.id) { queue[i].status = 'failed'; await saveQueue(); continue; }
+
+      // Navigate and set pending auto-start
+      await chrome.storage.local.set({
+        pendingAutoStart: true,
+        pendingTabId: tab.id,
+        scraperStats: { status: 'running', pagesProcessed: 0, totalSaved: 0, totalErrors: 0 }
+      });
+      await chrome.tabs.update(tab.id, { url: queue[i].url });
+
+      // Wait for scraping to complete (poll scraperStats for 'done' status)
+      const saved = await waitForScrapingDone(600000); // 10 min max per URL
+      queue[i].saved = saved;
+      queue[i].status = 'done';
+    } catch (e) {
+      queue[i].status = 'failed';
+    }
+    await saveQueue();
+  }
+
+  queueRunning = false;
+  renderQueue();
+  queueStatusEl.className = 'status-msg done'; queueStatusEl.textContent = `✅ Queue complete — ${queue.filter(q => q.status === 'done').length} URLs processed`;
+});
+
+async function waitForScrapingDone(timeout) {
+  const start = Date.now();
+  // Wait for scraper to actually start (status = 'running')
+  while (Date.now() - start < 30000) {
+    const { scraperStats } = await chrome.storage.local.get('scraperStats');
+    if (scraperStats?.status === 'running') break;
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  // Now wait for it to finish
+  while (Date.now() - start < timeout) {
+    const { scraperStats } = await chrome.storage.local.get('scraperStats');
+    if (scraperStats?.status === 'done' || scraperStats?.status === 'error' || scraperStats?.status === 'idle') {
+      return scraperStats?.totalSaved || 0;
+    }
+    await new Promise(r => setTimeout(r, 2000));
+  }
+  return 0; // timeout
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// APOLLO PANEL — Start/Stop/Scan for Apollo.io
+// ══════════════════════════════════════════════════════════════════════════════
+const btnApStart  = $('btnApStart');
+const btnApStop   = $('btnApStop');
+const btnApScan   = $('btnApScan');
+const apStatus    = $('apStatus');
+const apSaveResult = $('apSaveResult');
+const apSaved     = $('apSaved');
+const apPages     = $('apPages');
+const apTotal     = $('apTotal');
+
+btnApStart.addEventListener('click', async () => {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) return;
+  await chrome.storage.local.set({ scraperStats: { status: 'running', pagesProcessed: 0, totalSaved: 0, totalErrors: 0 } });
+  await chrome.tabs.sendMessage(tab.id, { action: 'START_AUTO' }).catch(() => {});
+  btnApStart.disabled = true; btnApStop.disabled = false;
+  apStatus.className = 'status-msg running'; apStatus.textContent = '⚡ Scraping Apollo…';
+  syncApollo();
+});
+
+btnApStop.addEventListener('click', async () => {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) return;
+  await chrome.tabs.sendMessage(tab.id, { action: 'STOP' }).catch(() => {});
+  const { scraperStats } = await chrome.storage.local.get('scraperStats');
+  if (scraperStats) { scraperStats.status = 'idle'; await chrome.storage.local.set({ scraperStats }); }
+  btnApStart.disabled = false; btnApStop.disabled = true;
+  apStatus.className = 'status-msg'; apStatus.textContent = 'Stopped';
+});
+
+btnApScan.addEventListener('click', async () => {
+  btnApScan.disabled = true; btnApScan.textContent = '⟳ Scanning…';
+  apSaveResult.classList.add('hidden');
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) { apDone('err', 'No active tab'); return; }
+  const r = await chrome.tabs.sendMessage(tab.id, { action: 'EXTRACT_AND_SAVE' }).catch(e => ({ ok: false, error: e.message }));
+  if (r?.ok) { apDone('ok', '✓ Saved ' + (r.saved || 0) + ' leads'); }
+  else { apDone('err', '✗ ' + (r?.error || 'Unknown error')); }
+  function apDone(cls, text) {
+    btnApScan.disabled = false; btnApScan.textContent = '🔍 Scan & Save This Page Only';
+    apSaveResult.className = 'save-result ' + cls; apSaveResult.textContent = text; apSaveResult.classList.remove('hidden');
+  }
+});
+
+async function syncApollo() {
+  const { scraperStats } = await chrome.storage.local.get('scraperStats');
+  if (!scraperStats) return;
+  apSaved.textContent = fmt(scraperStats.totalSaved || 0);
+  apPages.textContent = fmt(scraperStats.pagesProcessed || 0);
+  if (scraperStats.totalResults) apTotal.textContent = fmt(scraperStats.totalResults);
+  if (scraperStats.status === 'done') {
+    apStatus.className = 'status-msg done'; apStatus.textContent = '✅ Done! ' + fmt(scraperStats.totalSaved) + ' leads saved';
+    btnApStart.disabled = false; btnApStop.disabled = true;
+  } else if (scraperStats.status === 'running') {
+    apStatus.className = 'status-msg running'; apStatus.textContent = '⚡ Scraping… ' + fmt(scraperStats.totalSaved || 0) + ' saved';
+    btnApStart.disabled = true; btnApStop.disabled = false;
+  }
+}
+// Sync Apollo stats with same interval as LinkedIn
+setInterval(() => { if (currentPanel === 'apollo') syncApollo(); }, 800);
