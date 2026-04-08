@@ -292,17 +292,15 @@ goUrlInput.addEventListener('keydown', (e) => {
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
-// QUEUE SYSTEM — add multiple URLs, process sequentially
+// QUEUE SYSTEM — add URLs, they process automatically one after another
 // ══════════════════════════════════════════════════════════════════════════════
 const queueUrlInput = $('queueUrlInput');
 const btnQueueAdd = $('btnQueueAdd');
-const btnQueueStart = $('btnQueueStart');
 const btnQueueClear = $('btnQueueClear');
 const queueListEl = $('queueList');
 const queueStatusEl = $('queueStatus');
 
 let queue = []; // [{url, status:'pending'|'active'|'done'|'failed', saved:0}]
-let queueRunning = false;
 
 async function loadQueue() {
   const { scrapeQueue } = await chrome.storage.local.get('scrapeQueue');
@@ -318,6 +316,7 @@ async function saveQueue() {
 function renderQueue() {
   if (queue.length === 0) {
     queuePanel.classList.add('hidden');
+    queueStatusEl.classList.add('hidden');
     return;
   }
   queuePanel.classList.remove('hidden');
@@ -331,28 +330,56 @@ function renderQueue() {
     return `<div class="q-item ${cls}"><span class="q-icon">${icon}</span><span class="q-url ${cls}" title="${q.url.replace(/"/g,'&quot;')}">${label}</span>${q.status === 'pending' ? `<button class="q-remove" data-idx="${i}">×</button>` : ''}</div>`;
   }).join('');
 
-  // Remove button handlers
   queueListEl.querySelectorAll('.q-remove').forEach(btn => {
     btn.addEventListener('click', async () => {
-      const idx = parseInt(btn.dataset.idx);
-      queue.splice(idx, 1);
+      queue.splice(parseInt(btn.dataset.idx), 1);
       await saveQueue();
     });
   });
 
-  // Update start button
+  // Status line — no Start button; queue runs automatically
+  const active  = queue.filter(q => q.status === 'active').length;
   const pending = queue.filter(q => q.status === 'pending').length;
-  btnQueueStart.textContent = queueRunning ? '⟳ Running…' : `▶ Start Queue (${pending})`;
-  btnQueueStart.disabled = queueRunning || pending === 0;
+  const done    = queue.filter(q => q.status === 'done').length;
+  queueStatusEl.classList.remove('hidden');
+  if (active > 0) {
+    queueStatusEl.className = 'status-msg running';
+    queueStatusEl.textContent = '⚡ Scraping in progress — ' + pending + ' waiting…';
+  } else if (pending > 0) {
+    queueStatusEl.className = 'status-msg';
+    queueStatusEl.textContent = `⏳ ${pending} URL${pending > 1 ? 's' : ''} queued — will start after current scrape`;
+  } else {
+    queueStatusEl.className = 'status-msg done';
+    queueStatusEl.textContent = `✅ All done — ${done} URL${done > 1 ? 's' : ''} scraped`;
+  }
 }
 
-function addToQueue(url) {
+async function addToQueue(url) {
   if (!url) return;
   try { new URL(url); } catch { return; }
-  // Deduplicate
   if (queue.some(q => q.url === url && q.status === 'pending')) return;
-  queue.push({ url, status: 'pending', saved: 0 });
-  saveQueue();
+
+  const { scraperStats } = await chrome.storage.local.get('scraperStats');
+  const isRunning = scraperStats?.status === 'running';
+
+  if (!isRunning) {
+    // Nothing is currently scraping — navigate immediately and start
+    queue.push({ url, status: 'active', saved: 0 });
+    await saveQueue();
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tab?.id) {
+      await chrome.storage.local.set({
+        pendingAutoStart: true, pendingTabId: tab.id,
+        scraperStats: { status: 'running', pagesProcessed: 0, totalSaved: 0, totalErrors: 0 }
+      });
+      await chrome.tabs.update(tab.id, { url });
+      window.close(); // close popup — scraping will start automatically
+    }
+  } else {
+    // Something is scraping — add as pending; background.js auto-advances when done
+    queue.push({ url, status: 'pending', saved: 0 });
+    await saveQueue();
+  }
 }
 
 btnQueueAdd.addEventListener('click', () => { addToQueue(queueUrlInput.value.trim()); queueUrlInput.value = ''; });
@@ -361,65 +388,6 @@ queueUrlInput.addEventListener('keydown', (e) => {
 });
 btnAddQueue.addEventListener('click', () => { addToQueue(goUrlInput.value.trim()); goUrlInput.value = ''; });
 btnQueueClear.addEventListener('click', async () => { queue = []; await saveQueue(); });
-
-btnQueueStart.addEventListener('click', async () => {
-  if (queueRunning) return;
-  queueRunning = true;
-  renderQueue();
-  queueStatusEl.className = 'status-msg running'; queueStatusEl.classList.remove('hidden');
-  queueStatusEl.textContent = '⚡ Queue running…';
-
-  for (let i = 0; i < queue.length; i++) {
-    if (queue[i].status !== 'pending') continue;
-    queue[i].status = 'active';
-    await saveQueue();
-    queueStatusEl.textContent = `⚡ Processing ${i + 1}/${queue.length}…`;
-
-    try {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (!tab?.id) { queue[i].status = 'failed'; await saveQueue(); continue; }
-
-      // Navigate and set pending auto-start
-      await chrome.storage.local.set({
-        pendingAutoStart: true,
-        pendingTabId: tab.id,
-        scraperStats: { status: 'running', pagesProcessed: 0, totalSaved: 0, totalErrors: 0 }
-      });
-      await chrome.tabs.update(tab.id, { url: queue[i].url });
-
-      // Wait for scraping to complete (poll scraperStats for 'done' status)
-      const saved = await waitForScrapingDone(600000); // 10 min max per URL
-      queue[i].saved = saved;
-      queue[i].status = 'done';
-    } catch (e) {
-      queue[i].status = 'failed';
-    }
-    await saveQueue();
-  }
-
-  queueRunning = false;
-  renderQueue();
-  queueStatusEl.className = 'status-msg done'; queueStatusEl.textContent = `✅ Queue complete — ${queue.filter(q => q.status === 'done').length} URLs processed`;
-});
-
-async function waitForScrapingDone(timeout) {
-  const start = Date.now();
-  // Wait for scraper to actually start (status = 'running')
-  while (Date.now() - start < 30000) {
-    const { scraperStats } = await chrome.storage.local.get('scraperStats');
-    if (scraperStats?.status === 'running') break;
-    await new Promise(r => setTimeout(r, 1000));
-  }
-  // Now wait for it to finish
-  while (Date.now() - start < timeout) {
-    const { scraperStats } = await chrome.storage.local.get('scraperStats');
-    if (scraperStats?.status === 'done' || scraperStats?.status === 'error' || scraperStats?.status === 'idle') {
-      return scraperStats?.totalSaved || 0;
-    }
-    await new Promise(r => setTimeout(r, 2000));
-  }
-  return 0; // timeout
-}
 
 // ══════════════════════════════════════════════════════════════════════════════
 // APOLLO PANEL — Start/Stop/Scan for Apollo.io

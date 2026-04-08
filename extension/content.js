@@ -144,7 +144,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.action === 'SCAN') {
     (async () => {
       try {
-        if (getStrategy() === 'linkedin') await quickScroll();
+        if (getStrategy() === 'linkedin' || getStrategy() === 'apollo') await quickScroll();
         const blocks = await gatherBlocks();
         pageLeads = blocks;
         sendResponse({ ok: true, count: blocks.length, strategy: getStrategy() });
@@ -590,105 +590,100 @@ function walkUp(a) {
 }
 
 // ── Apollo.io ─────────────────────────────────────────────────────────────────
+// Apollo people search always puts person names in <a href="/people/..."> links.
+// We use those as anchors and walk up to the containing row/card to extract all fields.
 function gatherApollo() {
   const blocks = [], seen = new Set();
-  console.log('[Data Bunker] gatherApollo() — scanning DOM...');
 
-  // Apollo uses table rows in their people search (app.apollo.io/#/people)
-  const rows = document.querySelectorAll('tr[class*="zp_"]');
-  console.log('[Data Bunker] Apollo rows found:', rows.length);
+  const personLinks = document.querySelectorAll('a[href*="/people/"]');
+  console.log('[Data Bunker] gatherApollo() — person links found:', personLinks.length);
 
-  for (const row of rows) {
-    const cells = row.querySelectorAll('td');
-    if (cells.length < 3) continue;
+  for (const link of personLinks) {
+    const name = cleanName(link.textContent.trim());
+    if (!name || name.length < 2) continue;
 
-    const rawText = (row.innerText || '').replace(/\s+/g, ' ').trim();
-    if (rawText.length < 10) continue;
-    const key = rawText.slice(0, 100);
-    if (seen.has(key)) continue;
-    seen.add(key);
+    // Deduplicate by normalised name
+    const nameKey = name.toLowerCase().replace(/\s+/g, '');
+    if (seen.has(nameKey)) continue;
+    seen.add(nameKey);
 
-    let name = '', title = '', company = '', email = '', phone = '', location = '', linkedinUrl = '';
+    // Walk up to the containing row or card boundary
+    const row = link.closest('tr') || link.closest('[role="row"]') || apolloFindRow(link);
+    if (!row) continue;
 
-    // Extract structured data from cells
-    for (const cell of cells) {
-      const text = cell.textContent.trim();
-      if (!text || text.length < 2) continue;
+    // Get text lines from row, stripping Apollo's locked-feature button labels
+    const lines = (row.innerText || '')
+      .split('\n')
+      .map(l => l.trim())
+      .filter(l => l.length > 0 &&
+        !/^(access email|access mobile|click to run|qualify contact|qualify account|actions|links|score|add to list|name|job title|company|emails|phone numbers|location|# employees|industries|keywords)$/i.test(l) &&
+        !/^\+\d+$/.test(l)); // strip "+63" keyword-count suffixes
 
-      const nameLink = cell.querySelector('a[href*="/people/"], a[href*="#/contacts/"]');
-      if (nameLink && !name) { name = cleanName(nameLink.textContent.trim()); continue; }
+    // Name position in cleaned lines
+    const nameIdx = lines.findIndex(l => l.toLowerCase() === name.toLowerCase());
 
-      const emailEl = cell.querySelector('[data-cy-id*="email"], a[href^="mailto:"]');
-      if (emailEl) {
-        const mailto = emailEl.getAttribute('href');
-        if (mailto) email = mailto.replace('mailto:', '').trim();
-        else email = emailEl.textContent.trim();
+    // Title: line immediately after name
+    const titleIdx = nameIdx >= 0 ? nameIdx + 1 : 1;
+    const title = (titleIdx < lines.length && lines[titleIdx] &&
+      !/^(access|click|qualify)/i.test(lines[titleIdx]) &&
+      lines[titleIdx].length < 120) ? lines[titleIdx] : '';
+
+    // Company: prefer visible company link, then line after title
+    const compLink = row.querySelector('a[href*="/companies/"], a[href*="#/accounts/"]');
+    const company = compLink
+      ? compLink.textContent.trim()
+      : (titleIdx + 1 < lines.length ? lines[titleIdx + 1] : '');
+
+    // Location: any line matching "City, Country"
+    let location = '';
+    for (const line of lines) {
+      if (/,\s*(United Kingdom|United States|Canada|Australia|Germany|France|India|[A-Z][\w\s]{2,20})\s*$/.test(line)) {
+        location = line; break;
       }
-      const emailMatch = text.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/);
-      if (emailMatch && !email) email = emailMatch[0];
-
-      const phoneMatch = text.match(/[\+]?[\d][\d\s\-().]{6,16}[\d]/);
-      if (phoneMatch && !phone) phone = phoneMatch[0].trim();
-
-      const liLink = cell.querySelector('a[href*="linkedin.com/in/"]');
-      if (liLink) linkedinUrl = liUrl(liLink.href) || liLink.href;
     }
 
-    if (!title) {
-      const titleEl = row.querySelector('[class*="zp_Y6y8d"], [class*="contact_title"], [data-cy-id*="title"]');
-      if (titleEl) title = titleEl.textContent.trim();
-    }
-    if (!company) {
-      const compEl = row.querySelector('[class*="zp_J1j17"], [data-cy-id*="company"], a[href*="/companies/"], a[href*="#/accounts/"]');
-      if (compEl) company = compEl.textContent.trim();
-    }
-    if (!location) {
-      const locMatch = rawText.match(/(?:,\s*)?([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*,\s*[A-Z]{2}(?:\s*\d{5})?)/);
-      if (locMatch) location = locMatch[1];
-    }
+    // Email (usually locked on Apollo free, but try in case it's visible)
+    const em = (row.innerText || '').match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/);
 
-    // Fallback: extract from innerText lines
-    if (!name || !title) {
-      const lines = (row.innerText || '').split('\n').map(l => l.trim()).filter(l => l.length > 1);
-      if (!name && lines[0]) name = cleanName(lines[0]);
-      if (!title && lines[1]) title = lines[1];
-      if (!company && lines[2]) company = lines[2];
-    }
-
-    if (!name) continue;
+    const rawText = lines.join(' | ').slice(0, 800);
 
     blocks.push({
-      name, subtitle: title, company, email, phone, location,
-      profileUrl: linkedinUrl, rawText: rawText.slice(0, 800),
-      type: 'apollo_card'
+      name, subtitle: title, company,
+      email: em?.[0] || '', location,
+      rawText, type: 'apollo_card'
     });
   }
 
-  // Fallback: card-based layout
+  console.log('[Data Bunker] gatherApollo() TOTAL:', blocks.length);
+
+  // Fallback: plain table rows when person links aren't present
   if (blocks.length === 0) {
-    console.log('[Data Bunker] No table rows — trying card selectors');
-    const cards = document.querySelectorAll('[class*="zp_"], [class*="contact-row"], [data-cy-id*="contact"]');
-    for (const card of cards) {
-      const text = (card.innerText || '').trim();
-      if (text.length < 15) continue;
-      const ck = text.slice(0, 100);
-      if (seen.has(ck)) continue;
-      seen.add(ck);
-      const em = text.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/);
-      const ph = text.match(/[\+]?[\d][\d\s\-().]{6,16}[\d]/);
-      const lk = card.querySelector('a[href*="linkedin.com/in/"]');
-      blocks.push({ rawText: text.slice(0, 800), email: em?.[0] || '', phone: ph?.[0]?.trim() || '', profileUrl: lk ? lk.href : '', type: 'apollo_card' });
+    console.log('[Data Bunker] No person links — trying table rows');
+    const rows = Array.from(document.querySelectorAll('tr[class*="zp_"], table tbody tr'))
+      .filter(r => r.querySelectorAll('td').length >= 2 && (r.innerText || '').trim().length > 20);
+    for (const row of rows) {
+      const raw = (row.innerText || '').replace(/\s+/g, ' ').trim();
+      if (!/[A-Z][a-z]+ [A-Z][a-z]+/.test(raw)) continue;
+      const key = raw.slice(0, 80);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      blocks.push({ rawText: raw.slice(0, 800), type: 'apollo_card' });
     }
   }
 
-  // Last fallback: generic card approach
-  if (blocks.length === 0) {
-    console.log('[Data Bunker] Apollo fallback — using generic card approach');
-    return gatherCards('[class*="zp_"], tr[class*="zp_"]');
-  }
-
-  console.log('[Data Bunker] gatherApollo() TOTAL:', blocks.length, 'leads');
   return blocks;
+}
+
+function apolloFindRow(link) {
+  // Walk up until a container that has exactly 1 person link (clean row boundary)
+  let el = link;
+  for (let i = 0; i < 8; i++) {
+    if (!el.parentElement || el.parentElement === document.body) break;
+    el = el.parentElement;
+    if (el.querySelectorAll('a[href*="/people/"]').length === 1) return el;
+    if (el.tagName === 'TR' || el.tagName === 'LI') return el;
+  }
+  return link.closest('td') || link.parentElement;
 }
 
 // ── Apollo Helpers ─────────────────────────────────────────────────────────────
@@ -702,74 +697,119 @@ function apolloTotalResults() {
 }
 
 function apolloCurrentPage() {
+  // Apollo hash: #/people?page=2&finderViewId=...
   const hash = location.hash || '';
   const m = hash.match(/[?&]page=(\d+)/);
   return m ? parseInt(m[1]) : 1;
 }
 
-async function nextPageApollo() {
-  const current = apolloCurrentPage();
-  const nextNum = current + 1;
-  console.log('[Data Bunker] Apollo nextPage() — page', current, '→', nextNum);
-
-  const url = new URL(location.href);
-  let hash = url.hash || '#/people';
-  if (hash.includes('page=')) {
-    hash = hash.replace(/page=\d+/, 'page=' + nextNum);
-  } else {
-    hash += (hash.includes('?') ? '&' : '?') + 'page=' + nextNum;
+function getFirstApolloName() {
+  const links = document.querySelectorAll('a[href*="/people/"]');
+  for (const link of links) {
+    const name = cleanName(link.textContent.trim());
+    if (name && name.length > 2) return name;
   }
-  const nextUrl = location.origin + location.pathname + location.search + hash;
-  console.log('[Data Bunker] Apollo next URL:', nextUrl);
-
-  navPending = true;
-  stopFlag = true;
-
-  const currentStats = await chrome.storage.local.get('scraperStats').catch(() => ({}));
-  await chrome.storage.local.set({
-    scraperStats: { ...currentStats?.scraperStats, status: 'running', lastUpdate: Date.now() },
-    pendingAutoStart: true
-  }).catch(() => {});
-
-  chrome.runtime.sendMessage({ type: 'NAV_TO_URL', url: nextUrl }).catch(() => {});
-  await sleep(3000);
-  if (apolloCurrentPage() === current) {
-    window.location.href = nextUrl;
-  }
-  return false;
+  return '';
 }
 
-// ── Apollo Auto-Scraper ───────────────────────────────────────────────────────
+function findApolloNextButton() {
+  // Strategy 1: aria-label / title / data-cy
+  for (const q of [
+    '[aria-label*="Next" i]', '[aria-label*="next page" i]',
+    '[title*="next" i]', '[data-cy*="next" i]',
+  ]) {
+    try {
+      const el = document.querySelector(q);
+      if (el && !el.disabled && el.getAttribute('aria-disabled') !== 'true') return el;
+    } catch {}
+  }
+
+  // Strategy 2: find the "X - Y of Z" pagination text and look for the following button
+  for (const el of document.querySelectorAll('span, div')) {
+    if (/\d+\s*-\s*\d+\s+of\s+[\d,]+/.test(el.textContent) && el.children.length === 0) {
+      let container = el.parentElement;
+      for (let i = 0; i < 5 && container; i++) {
+        const btns = [...container.querySelectorAll('button:not([disabled])')];
+        if (btns.length >= 2) {
+          const last = btns[btns.length - 1];
+          if (!/prev|back|first|<<|«/i.test(last.getAttribute('aria-label') || '')) return last;
+        }
+        container = container.parentElement;
+      }
+      break;
+    }
+  }
+
+  // Strategy 3: icon-only button in page-bottom area (Apollo uses SVG chevron buttons)
+  const allBtns = [...document.querySelectorAll('button:not([disabled])')].reverse();
+  for (const btn of allBtns) {
+    const ariaLabel = (btn.getAttribute('aria-label') || btn.getAttribute('title') || '').toLowerCase();
+    if (ariaLabel.includes('next')) return btn;
+    if (btn.querySelector('svg') && !btn.textContent.trim()) {
+      const rect = btn.getBoundingClientRect();
+      if (rect.bottom > window.innerHeight * 0.5 && rect.width > 0 && rect.width < 60) return btn;
+    }
+  }
+  return null;
+}
+
+async function apolloClickNext() {
+  const prevName = getFirstApolloName();
+  const nextBtn = findApolloNextButton();
+
+  if (nextBtn) {
+    console.log('[Data Bunker] Apollo Next button found — clicking');
+    nextBtn.click();
+  } else {
+    // Fallback: update the hash URL — Apollo's React Router will re-render
+    const current = apolloCurrentPage();
+    const hash = location.hash || '#/people';
+    const newHash = hash.includes('page=')
+      ? hash.replace(/page=\d+/, 'page=' + (current + 1))
+      : hash + (hash.includes('?') ? '&' : '?') + 'page=' + (current + 1);
+    console.log('[Data Bunker] Apollo no Next btn — updating hash:', newHash);
+    location.hash = newHash.replace(/^#/, '');
+    window.dispatchEvent(new Event('hashchange'));
+  }
+
+  // Wait for the person list to change (new page data)
+  const changed = await waitFor(
+    () => getFirstApolloName() !== prevName && getFirstApolloName() !== '',
+    20000
+  );
+  if (changed) console.log('[Data Bunker] Apollo page changed → first name:', getFirstApolloName());
+  else console.log('[Data Bunker] Apollo: page content did not change — stopping');
+  return changed;
+}
+
+// ── Apollo Auto-Scraper (SPA mode — stays in same content script session) ─────
 async function runAutoApollo() {
-  isActive = true; stopFlag = false;
-  console.log('[Data Bunker] runAutoApollo() started — URL:', location.href);
+  isActive = true; stopFlag = false; navPending = false;
+  console.log('[Data Bunker] runAutoApollo() started');
 
   const stored = await chrome.storage.local.get('scraperStats').catch(() => ({}));
   const prev = stored?.scraperStats || {};
   let pages = (prev.status === 'running') ? (prev.pagesProcessed || 0) : 0;
-  let saved = (prev.status === 'running') ? (prev.totalSaved || 0) : 0;
+  let saved  = (prev.status === 'running') ? (prev.totalSaved    || 0) : 0;
   const seenKeys = new Set();
 
   chrome.runtime.sendMessage({ type: 'SCRAPING_STARTED' }).catch(() => {});
 
   let consecutiveEmpty = 0;
   const MAX_EMPTY = 3;
-  const MAX_PAGES = 200;
+  const MAX_PAGES = 100;
 
   try {
     while (!stopFlag && pages < MAX_PAGES) {
       const pn = apolloCurrentPage();
       console.log('[Data Bunker] ═══ Apollo page', pn, '═══');
 
-      const hasResults = await waitFor(() => {
-        return document.querySelectorAll('tr[class*="zp_"], [class*="zp_"]').length >= 2;
-      }, 25000);
-
-      if (!hasResults) {
-        console.log('[Data Bunker] No Apollo results loaded — end');
-        break;
-      }
-      if (stopFlag) break;
+      // Wait for person links (they load asynchronously in the SPA)
+      const hasResults = await waitFor(
+        () => document.querySelectorAll('a[href*="/people/"]').length >= 1,
+        30000
+      );
+      if (!hasResults || stopFlag) break;
 
       await humanScroll();
       if (stopFlag) break;
@@ -778,7 +818,7 @@ async function runAutoApollo() {
 
       const blocks = gatherApollo();
       const newBlocks = blocks.filter(b => {
-        const k = (b.name + '|' + (b.email || b.profileUrl || b.rawText?.slice(0, 50)));
+        const k = b.name + '|' + (b.rawText || '').slice(0, 60);
         if (seenKeys.has(k)) return false;
         seenKeys.add(k);
         return true;
@@ -813,20 +853,21 @@ async function runAutoApollo() {
       pages++;
       progress({ pagesProcessed: pages, totalSaved: saved, pageNum: pn, totalResults: total, pageSaved });
 
-      const delay = 2000 + Math.random() * 3000;
-      await sleep(delay);
+      await sleep(2000 + Math.random() * 3000);
       if (stopFlag) break;
 
-      if (!(await nextPageApollo())) break;
+      // SPA navigation — content script stays alive, no background restart needed
+      const moved = await apolloClickNext();
+      if (!moved) { console.log('[Data Bunker] Apollo: no more pages'); break; }
+      await sleep(1500 + Math.random() * 1000); // let React re-render
     }
   } finally { isActive = false; }
 
-  if (!navPending) {
-    console.log('[Data Bunker] 🏁 Apollo complete — pages:', pages, 'saved:', saved);
-    chrome.runtime.sendMessage({ type: 'SCRAPING_DONE', data: { pagesProcessed: pages, totalSaved: saved } }).catch(() => {});
-  }
-  navPending = false;
+  console.log('[Data Bunker] 🏁 Apollo complete — pages:', pages, 'saved:', saved);
+  chrome.runtime.sendMessage({ type: 'SCRAPING_DONE', data: { pagesProcessed: pages, totalSaved: saved } }).catch(() => {});
 }
+
+
 
 // ── Google Maps ───────────────────────────────────────────────────────────────
 function gatherMaps() {

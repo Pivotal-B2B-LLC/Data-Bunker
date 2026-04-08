@@ -90,8 +90,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     case 'SCRAPING_DONE':
       stopKeepalive();
       chrome.storage.local.remove('activeScraperTabId');
-      chrome.storage.local.get('scraperStats', ({ scraperStats = {} }) => {
+      chrome.storage.local.get(['scraperStats', 'scrapeQueue'], ({ scraperStats = {}, scrapeQueue }) => {
         updateStats({ ...scraperStats, status: 'done', ...msg.data, lastUpdate: Date.now() });
+        // Auto-advance the scrape queue to the next pending URL
+        if (scrapeQueue && scrapeQueue.length > 0) {
+          advanceQueue(sender.tab?.id, scrapeQueue);
+        }
       });
       break;
 
@@ -131,6 +135,42 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 function updateStats(stats) {
   chrome.storage.local.set({ scraperStats: stats });
+}
+
+// ── Queue Auto-Advance ────────────────────────────────────────────────────────
+async function advanceQueue(tabId, queue) {
+  // Mark any currently-active items as done
+  for (const item of queue) {
+    if (item.status === 'active') item.status = 'done';
+  }
+  // Find the next pending URL
+  const next = queue.find(q => q.status === 'pending');
+  if (!next) {
+    await chrome.storage.local.set({ scrapeQueue: queue });
+    console.log('[bg] Queue complete — all URLs processed');
+    return;
+  }
+  next.status = 'active';
+  await chrome.storage.local.set({ scrapeQueue: queue });
+
+  // Navigate the tab to the next URL
+  const targetTabId = tabId || await getActiveTabId();
+  if (!targetTabId) { console.warn('[bg] Queue advance: no tab found'); return; }
+
+  await chrome.storage.local.set({
+    pendingAutoStart: true,
+    pendingTabId: targetTabId,
+    scraperStats: { status: 'running', pagesProcessed: 0, totalSaved: 0, totalErrors: 0 }
+  });
+  chrome.tabs.update(targetTabId, { url: next.url }).catch(err =>
+    console.error('[bg] Queue advance navigation failed:', err)
+  );
+  console.log('[bg] Queue advancing to:', next.url);
+}
+
+async function getActiveTabId() {
+  const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  return tabs[0]?.id || null;
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
