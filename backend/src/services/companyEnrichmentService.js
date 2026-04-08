@@ -7,6 +7,7 @@ const { pool, query } = require('../db/connection');
 const webScraperService = require('./webScraperService');
 const directWebDiscovery = require('./directWebDiscovery');
 const companiesHouse = require('./companiesHouse');
+const ollama = require('./ollamaService');
 
 class CompanyEnrichmentService {
   constructor() {
@@ -187,6 +188,55 @@ class CompanyEnrichmentService {
 
       if (fieldsUpdated.length > 0) {
         status = fieldsUpdated.length >= 2 ? 'success' : 'partial';
+      }
+
+      // Use Llama 3.2 to classify industry if still missing
+      if (!enrichmentData.industry) {
+        try {
+          const llmAvailable = await ollama.isAvailable();
+          if (llmAvailable) {
+            const guessedIndustry = await ollama.classifyIndustry(
+              company.name,
+              enrichmentData.description || ''
+            );
+            if (guessedIndustry && guessedIndustry.length > 2) {
+              enrichmentData.industry = guessedIndustry;
+              fieldsUpdated.push('industry');
+              dataSources.push('llm_classification');
+              console.log(`[Enrichment] ✓ LLM classified industry: ${guessedIndustry}`);
+            }
+          }
+        } catch (llmErr) {
+          console.warn('[Enrichment] LLM industry classification failed:', llmErr.message);
+        }
+      }
+
+      // LLM validation pass — strip any fake/invalid values from what we discovered
+      try {
+        const llmAvailable = await ollama.isAvailable();
+        if (llmAvailable) {
+          const validation = await ollama.validateCompanyRecord({
+            name: company.name,
+            email: enrichmentData.email || null,
+            phone: enrichmentData.phone || null,
+            industry: enrichmentData.industry || null,
+          });
+
+          if (validation.fieldsToNullify.includes('email')) {
+            enrichmentData.email = null;
+            console.log(`[Enrichment] ✗ LLM rejected email for "${company.name}"`);
+          }
+          if (validation.fieldsToNullify.includes('phone')) {
+            enrichmentData.phone = null;
+            console.log(`[Enrichment] ✗ LLM rejected phone for "${company.name}"`);
+          }
+          if (validation.fieldsToNullify.includes('industry')) {
+            enrichmentData.industry = null;
+            console.log(`[Enrichment] ✗ LLM rejected industry for "${company.name}"`);
+          }
+        }
+      } catch (llmErr) {
+        // Validation is best-effort — carry on
       }
 
       await client.query(

@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "Data Bunker — B2B Lead Scraper",
+  "version": "5.0.0",
+  "description": "Universal B2B lead extraction. LinkedIn, Apollo, Google Maps, and any directory.",
+  "permissions": [
+    "activeTab",
+    "storage",
+    "alarms",
+    "scripting"
+  ],
+  "host_permissions": [
+    "*://*/*",
+    "http://localhost:5000/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Data Bunker Scraper"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

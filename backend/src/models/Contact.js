@@ -18,15 +18,26 @@ class Contact {
       linked_account_id
     } = filters;
 
-    const {
+    let {
       limit = 50,
       offset = 0,
       orderBy = 'created_at',
       orderDirection = 'DESC'
     } = options;
 
+    // Whitelist allowed ORDER BY columns to prevent SQL injection
+    const ALLOWED_ORDER_COLUMNS = [
+      'created_at', 'updated_at', 'first_name', 'last_name',
+      'job_title', 'email', 'contact_id'
+    ];
+    const ALLOWED_ORDER_DIRECTIONS = ['ASC', 'DESC'];
+
+    if (!ALLOWED_ORDER_COLUMNS.includes(orderBy)) orderBy = 'created_at';
+    if (!ALLOWED_ORDER_DIRECTIONS.includes(orderDirection.toUpperCase())) orderDirection = 'DESC';
+    limit = Math.min(Math.max(1, parseInt(limit) || 50), 500);
+
     let query = `
-      SELECT 
+      SELECT
         c.*,
         a.company_name,
         a.industry as company_industry,
@@ -35,7 +46,7 @@ class Contact {
       LEFT JOIN accounts a ON c.linked_account_id = a.account_id
       WHERE 1=1
     `;
-    
+
     const params = [];
     let paramCount = 1;
 
@@ -70,7 +81,7 @@ class Contact {
       paramCount++;
     }
 
-    // Add ordering
+    // Add ordering (sanitized above)
     query += ` ORDER BY c.${orderBy} ${orderDirection}`;
 
     // Add pagination
@@ -194,12 +205,19 @@ class Contact {
       }
     }
 
+    // Whitelist allowed fields to prevent arbitrary column injection
+    const ALLOWED_UPDATE_FIELDS = [
+      'first_name', 'last_name', 'job_title', 'email', 'phone_number',
+      'country', 'city', 'linked_account_id', 'linkedin_url',
+      'verified', 'confidence_score', 'data_source'
+    ];
+
     const fields = [];
     const values = [];
     let paramCount = 1;
 
     Object.keys(contactData).forEach(key => {
-      if (contactData[key] !== undefined && key !== 'contact_id') {
+      if (contactData[key] !== undefined && ALLOWED_UPDATE_FIELDS.includes(key)) {
         fields.push(`${key} = $${paramCount++}`);
         values.push(contactData[key]);
       }

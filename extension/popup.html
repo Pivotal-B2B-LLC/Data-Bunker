@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Data Bunker</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="shell">
+
+    <!-- Header -->
+    <header class="header">
+      <div class="logo">
+        <span class="logo-dot"></span>
+        <span class="logo-text">DATA BUNKER</span>
+        <span class="logo-ver">v5</span>
+      </div>
+      <div id="serverPill" class="server-pill offline">
+        <span class="server-dot"></span>
+        <span id="serverLabel">offline</span>
+      </div>
+    </header>
+
+    <!-- Site detection bar -->
+    <div id="siteBar" class="site-bar hidden">
+      <span id="siteIcon">🌐</span>
+      <span id="siteHost">—</span>
+      <span id="siteBadge" class="site-bar-badge">—</span>
+    </div>
+
+    <!-- ═══ IDLE PANEL ═══ -->
+    <div id="idlePanel" class="panel text-center hidden">
+      <div class="panel-icon">🔍</div>
+      <p class="panel-title">Navigate to a page to scrape</p>
+      <p class="panel-sub">Open LinkedIn search, Apollo, Google Maps, Yelp, or any business directory.</p>
+      <a href="https://www.linkedin.com/search/results/people/" target="_blank" class="btn btn-outline" style="display:inline-block;flex:none;padding:7px 14px">Open LinkedIn Search ↗</a>
+    </div>
+
+    <!-- ═══ UNIVERSAL PANEL (any non-LinkedIn site) ═══ -->
+    <div id="universalPanel" class="panel hidden">
+
+      <div class="section">
+        <div class="section-label">SCAN PAGE</div>
+        <p style="font-size:11px;color:var(--muted);margin-bottom:8px">Detects leads from any page — cards, tables, lists, directories.</p>
+        <button id="btnScan" class="btn btn-primary" style="width:100%">🔍 Scan for Leads</button>
+        <div id="scanResult" class="scan-result hidden"></div>
+      </div>
+
+      <div id="extractSection" class="section hidden">
+        <button id="btnExtract" class="btn btn-teal" style="width:100%">⚡ Extract & Save to Database</button>
+        <div id="saveResult" class="save-result hidden"></div>
+      </div>
+
+      <a href="http://localhost:3000/contacts" target="_blank" class="dash-link">View in Dashboard ↗</a>
+    </div>
+
+    <!-- ═══ LINKEDIN PANEL ═══ -->
+    <div id="linkedinPanel" class="panel hidden">
+
+      <div class="section">
+        <div class="section-label">FILTERS</div>
+        <div id="filtersRow" class="filters-row">
+          <span class="no-filters">No filters detected</span>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="progress-header">
+          <span class="section-label">PROGRESS</span>
+          <span id="progressPct" class="progress-pct">0%</span>
+        </div>
+        <div class="progress-track">
+          <div id="progressFill" class="progress-fill" style="width:0%"></div>
+        </div>
+        <div id="progressSub" class="progress-sub">Waiting…</div>
+      </div>
+
+      <div class="stats-row">
+        <div class="stat-box"><div id="statSaved" class="stat-val accent">0</div><div class="stat-key">SAVED</div></div>
+        <div class="stat-box"><div id="statPages" class="stat-val">0</div><div class="stat-key">PAGES</div></div>
+        <div class="stat-box"><div id="statErrors" class="stat-val dim">0</div><div class="stat-key">ERRORS</div></div>
+        <div class="stat-box"><div id="statTotal" class="stat-val dim">?</div><div class="stat-key">TOTAL</div></div>
+      </div>
+
+      <div id="detectedBar" class="detected-bar hidden">
+        <span class="detected-dot"></span>
+        <span id="detectedLabel">—</span>
+      </div>
+
+      <div id="statusMsg" class="status-msg">Ready — press Start to begin</div>
+
+      <div class="controls">
+        <button id="btnStart" class="btn btn-primary">▶  START</button>
+        <button id="btnStop" class="btn btn-danger" disabled>⏹  STOP</button>
+      </div>
+
+      <!-- One-click extract for manual use on LinkedIn -->
+      <div class="section" style="margin-top:4px">
+        <button id="btnLiScan" class="btn btn-teal" style="width:100%;font-size:11px">🔍 Scan & Save This Page Only</button>
+        <div id="liSaveResult" class="save-result hidden"></div>
+      </div>
+
+      <a href="http://localhost:3000/contacts" target="_blank" class="dash-link">View in Dashboard ↗</a>
+    </div>
+
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

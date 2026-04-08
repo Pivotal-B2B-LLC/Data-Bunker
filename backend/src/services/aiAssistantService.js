@@ -7,6 +7,7 @@ const companiesHouse = require('./companiesHouse');
 const openCorporates = require('./openCorporates');
 const googlePlaces = require('./googlePlacesService');
 const webScraper = require('./webScraperService');
+const ollama = require('./ollamaService');
 
 class EnhancedAIAssistant {
   constructor() {
@@ -207,7 +208,7 @@ class EnhancedAIAssistant {
       set_preference: () => this._setPreference(intent, sessionId),
       greeting: () => this._handleGreeting(intent, history),
       help: () => this._showHelp(),
-      explanation: () => this._explainConcept(intent, history),
+      explanation: async () => this._explainConcept(intent, history),
       suggestion_request: () => this._provideSuggestions(intent, context),
       conversational: () => this._handleConversation(intent, history)
     };
@@ -642,26 +643,41 @@ class EnhancedAIAssistant {
   }
 
   /**
-   * Handle general queries
+   * Handle general queries — powered by Llama 3.2 if available
    */
-  _handleGeneralQuery(intent, history) {
+  async _handleGeneralQuery(intent, history) {
+    try {
+      const llmAvailable = await ollama.isAvailable();
+      if (llmAvailable) {
+        const answer = await ollama.answerQuestion(intent.raw || intent.params?.query || '');
+        if (answer) {
+          return {
+            message: answer,
+            type: 'general',
+            suggestions: ['Search for a company', 'What can you do?', 'Give me ideas'],
+          };
+        }
+      }
+    } catch (err) {
+      console.warn('[AI Assistant] Ollama unavailable for general query:', err.message);
+    }
+
     const responses = [
       "I'm not quite sure what you're asking. Could you rephrase that? Try asking me to search for a company or type 'help' to see what I can do.",
       "Hmm, I didn't catch that. I can help you find companies, get contact info, or scrape websites. What would you like to do?",
-      "I'm here to help with company research! Try asking me to search for a company or find contact information."
+      "I'm here to help with company research! Try asking me to search for a company or find contact information.",
     ];
-
     return {
       message: responses[Math.floor(Math.random() * responses.length)],
       type: 'general',
-      suggestions: ["Help", "Search for Tesla", "What can you do?"]
+      suggestions: ['Help', 'Search for Tesla', 'What can you do?'],
     };
   }
 
   /**
    * Explain concepts and answer "what is" questions
    */
-  _explainConcept(intent, history) {
+  async _explainConcept(intent, history) {
     const { query } = intent.params;
     const concept = query ? query.toLowerCase().trim() : '';
 
@@ -741,7 +757,23 @@ class EnhancedAIAssistant {
       };
     }
 
-    // Fallback for unknown concepts
+    // Fallback for unknown concepts — ask Ollama
+    try {
+      const llmAvailable = await ollama.isAvailable();
+      if (llmAvailable) {
+        const answer = await ollama.answerQuestion(`Explain "${concept || query}" in the context of business data and company research.`);
+        if (answer) {
+          return {
+            message: answer,
+            type: 'explanation',
+            suggestions: ['What is scraping?', 'What is OpenCorporates?', 'Search for a company'],
+          };
+        }
+      }
+    } catch (err) {
+      console.warn('[AI Assistant] Ollama explain fallback error:', err.message);
+    }
+
     return {
       message: `I'd love to explain "${query}" to you, but I'm specialized in company research and data extraction.\n\n` +
         `I can explain terms like:\n` +
@@ -753,7 +785,7 @@ class EnhancedAIAssistant {
         `• Location filtering\n\n` +
         `Or ask me to help you find company information instead!`,
       type: 'explanation',
-      suggestions: ["What is scraping?", "What is OpenCorporates?", "Search for a company"]
+      suggestions: ['What is scraping?', 'What is OpenCorporates?', 'Search for a company'],
     };
   }
 
@@ -831,9 +863,9 @@ class EnhancedAIAssistant {
   }
 
   /**
-   * Handle conversational queries with intelligence
+   * Handle conversational queries with intelligence — powered by Llama 3.2
    */
-  _handleConversation(intent, history) {
+  async _handleConversation(intent, history) {
     const { query } = intent.params;
     const lowerQuery = query.toLowerCase();
 
@@ -873,7 +905,23 @@ class EnhancedAIAssistant {
       };
     }
 
-    // Provide intelligent fallback
+    // Provide intelligent fallback — use Ollama LLM
+    try {
+      const llmAvailable = await ollama.isAvailable();
+      if (llmAvailable) {
+        const answer = await ollama.answerQuestion(query || intent.raw || '');
+        if (answer) {
+          return {
+            message: answer,
+            type: 'conversational',
+            suggestions: ['Search for a company', 'What can you do?', 'Give me ideas'],
+          };
+        }
+      }
+    } catch (err) {
+      console.warn('[AI Assistant] Ollama fallback error:', err.message);
+    }
+
     return {
       message: `I'm here to help you find and research companies! I can:\n\n` +
         `🔍 Search for any company worldwide\n` +
@@ -888,12 +936,7 @@ class EnhancedAIAssistant {
         `• "Give me some ideas"\n` +
         `• "Find companies in London"`,
       type: 'conversational',
-      suggestions: [
-        "Search for a company",
-        "What is scraping?",
-        "Give me ideas",
-        "What can you do?"
-      ]
+      suggestions: ['Search for a company', 'What is scraping?', 'Give me ideas', 'What can you do?'],
     };
   }
 

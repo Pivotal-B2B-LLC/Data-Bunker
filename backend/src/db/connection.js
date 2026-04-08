@@ -18,8 +18,8 @@ const poolConfig = process.env.DATABASE_URL ? {
   ssl: {
     rejectUnauthorized: false // Required for Neon and other cloud databases
   },
-  max: 50, // Maximum number of clients in the pool
-  min: 5, // Minimum number of clients in the pool
+  max: 100, // Maximum number of clients in the pool (increased for FAST MODE)
+  min: 10, // Minimum number of clients in the pool
   idleTimeoutMillis: 30000, // Close idle clients after 30 seconds
   connectionTimeoutMillis: 10000, // Return error after 10 seconds if connection not established
   allowExitOnIdle: false, // Don't allow pool to exit on idle
@@ -47,10 +47,10 @@ if (!process.env.DATABASE_URL && (process.env.DB_SSL === 'true' || process.env.D
 
 const pool = new Pool(poolConfig);
 
-// Connection event handlers
+// Connection event handlers - don't crash on idle client errors
 pool.on('error', (err) => {
-  console.error('Unexpected error on idle client', err);
-  process.exit(-1);
+  console.error('Unexpected error on idle client:', err.message);
+  // Don't exit - let the pool recover automatically
 });
 
 pool.on('connect', () => {

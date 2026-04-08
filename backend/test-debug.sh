@@ -1,0 +1,1 @@
+curl -s -X POST http://localhost:5000/api/scraper/debug -H "Content-Type: application/json" -d '{"people":[{"fullName":"Ahmed Al-Rashid","jobTitle":"","company":"","location":"Dubai, UAE","profileUrl":"https://linkedin.com/in/ahmed","rawSnippet":"Ahmed Al-Rashid Director of Operations at Emirates Group Dubai UAE 2nd connection"}]}' | python3 -m json.tool

@@ -50,6 +50,28 @@ Thumbs.db
 
 # Misc
 .env.production.local
+.env.production.template
 .venv
 venv/
 __pycache__/
+
+# Files with hardcoded credentials — use process.env instead
+backend/scripts/check-neon-status.js
+backend/scripts/clean-migrate-to-neon.sh
+backend/scripts/fast-migrate-to-neon.sh
+backend/scripts/migrate-remaining-tables.js
+backend/scripts/migrate-to-neon.js
+backend/scripts/simple-migrate.js
+backend/scripts/stream-migrate-to-neon.js
+backend/setup-complete.js
+backend/setup-neon.js
+backend/test-neon.js
+NEON_DEPLOYMENT.md
+
+# Runtime files
+backend/discovery.pid
+backend/enrichment-manager.pid
+nohup.out
+
+# Backup files
+**/*.bak

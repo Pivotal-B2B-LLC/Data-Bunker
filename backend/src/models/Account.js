@@ -6,149 +6,111 @@
 const { pool } = require('../db/connection');
 const { getLinkedInCategories, getNAICSCodesForCategory } = require('../data/industry-mapping');
 
+// Whitelist of allowed columns for ordering
+const ALLOWED_ORDER_COLUMNS = [
+  'created_at', 'updated_at', 'company_name', 'city',
+  'country', 'state_region', 'industry', 'account_id'
+];
+
+const ALLOWED_ORDER_DIRECTIONS = ['ASC', 'DESC'];
+
 class Account {
+  /**
+   * Build WHERE clause and params from filters (shared between data + count queries)
+   */
+  static _buildFilterClause(filters) {
+    const { country, state_region, city, district, ward, industry, company_size, revenue, search } = filters;
+    const conditions = [];
+    const params = [];
+    let paramCount = 1;
+
+    if (country) {
+      conditions.push(`country = $${paramCount++}`);
+      params.push(country);
+    }
+    if (state_region) {
+      conditions.push(`state_region = $${paramCount++}`);
+      params.push(state_region);
+    }
+    if (city) {
+      conditions.push(`city = $${paramCount++}`);
+      params.push(city);
+    }
+    if (district) {
+      conditions.push(`district = $${paramCount++}`);
+      params.push(district);
+    }
+    if (ward) {
+      conditions.push(`ward = $${paramCount++}`);
+      params.push(ward);
+    }
+    if (industry) {
+      const naicsCodes = getNAICSCodesForCategory(industry);
+      if (naicsCodes && naicsCodes.length > 0) {
+        const sub = naicsCodes.map((code, idx) => `industry LIKE $${paramCount + idx}`);
+        conditions.push(`(${sub.join(' OR ')})`);
+        naicsCodes.forEach(code => params.push(`${code}%`));
+        paramCount += naicsCodes.length;
+      } else {
+        conditions.push(`industry ILIKE $${paramCount++}`);
+        params.push(`%${industry}%`);
+      }
+    }
+    if (company_size) {
+      conditions.push(`company_size ILIKE $${paramCount++}`);
+      params.push(`${company_size}%`);
+    }
+    if (revenue) {
+      conditions.push(`revenue = $${paramCount++}`);
+      params.push(revenue);
+    }
+    if (search) {
+      conditions.push(`(company_name ILIKE $${paramCount} OR website ILIKE $${paramCount})`);
+      params.push(`%${search}%`);
+      paramCount++;
+    }
+
+    const whereClause = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
+    return { whereClause, params, paramCount };
+  }
+
   /**
    * Get all accounts with filtering and pagination
    */
   static async findAll(filters = {}, options = {}) {
-    const {
-      country,
-      state_region,
-      city,
-      district,
-      industry,
-      company_size,
-      revenue,
-      search
-    } = filters;
-
-    const {
+    let {
       limit = 50,
       offset = 0,
       orderBy = 'created_at',
       orderDirection = 'DESC'
     } = options;
 
-    let query = 'SELECT * FROM accounts WHERE 1=1';
-    const params = [];
-    let paramCount = 1;
+    // Sanitize ordering to prevent SQL injection
+    if (!ALLOWED_ORDER_COLUMNS.includes(orderBy)) orderBy = 'created_at';
+    if (!ALLOWED_ORDER_DIRECTIONS.includes(orderDirection.toUpperCase())) orderDirection = 'DESC';
 
-    // Add filters
-    if (country) {
-      query += ` AND country = $${paramCount++}`;
-      params.push(country);
-    }
+    // Enforce pagination limits
+    limit = Math.min(Math.max(1, parseInt(limit) || 50), 500);
+    offset = Math.max(0, parseInt(offset) || 0);
 
-    if (state_region) {
-      query += ` AND state_region = $${paramCount++}`;
-      params.push(state_region);
-    }
+    const { whereClause, params, paramCount } = Account._buildFilterClause(filters);
 
-    if (city) {
-      query += ` AND city = $${paramCount++}`;
-      params.push(city);
-    }
-
-    if (district) {
-      query += ` AND (address ILIKE $${paramCount} OR city ILIKE $${paramCount})`;
-      params.push(`%${district}%`);
-      paramCount++;
-    }
-
-    if (industry) {
-      // Map LinkedIn category to NAICS codes
-      const naicsCodes = getNAICSCodesForCategory(industry);
-      if (naicsCodes && naicsCodes.length > 0) {
-        // Match any NAICS code that starts with one of the mapped codes
-        const conditions = naicsCodes.map((code, idx) => `industry LIKE $${paramCount + idx}`);
-        query += ` AND (${conditions.join(' OR ')})`;
-        naicsCodes.forEach(code => params.push(`${code}%`));
-        paramCount += naicsCodes.length;
-      } else {
-        // If no mapping found, search as-is
-        query += ` AND industry ILIKE $${paramCount++}`;
-        params.push(`%${industry}%`);
-      }
-    }
-
-    if (company_size) {
-      query += ` AND company_size = $${paramCount++}`;
-      params.push(company_size);
-    }
-
-    if (revenue) {
-      query += ` AND revenue = $${paramCount++}`;
-      params.push(revenue);
-    }
-
-    if (search) {
-      query += ` AND (company_name ILIKE $${paramCount} OR website ILIKE $${paramCount})`;
-      params.push(`%${search}%`);
-      paramCount++;
-    }
-
-    // Add ordering
-    query += ` ORDER BY ${orderBy} ${orderDirection}`;
-
-    // Add pagination
-    query += ` LIMIT $${paramCount++} OFFSET $${paramCount}`;
+    // Data query
+    const dataQuery = `SELECT * FROM accounts ${whereClause} ORDER BY ${orderBy} ${orderDirection} LIMIT $${paramCount} OFFSET $${paramCount + 1}`;
     params.push(limit, offset);
 
-    const result = await pool.query(query, params);
-    
-    // Get total count with same filters
-    let countQuery = 'SELECT COUNT(*) FROM accounts WHERE 1=1';
-    const countParams = [];
-    let countParamCount = 1;
-    
-    if (country) {
-      countQuery += ` AND country = $${countParamCount++}`;
-      countParams.push(country);
-    }
-    if (state_region) {
-      countQuery += ` AND state_region = $${countParamCount++}`;
-      countParams.push(state_region);
-    }
-    if (city) {
-      countQuery += ` AND city = $${countParamCount++}`;
-      countParams.push(city);
-    }
-    if (district) {
-      countQuery += ` AND (address ILIKE $${countParamCount} OR city ILIKE $${countParamCount})`;
-      countParams.push(`%${district}%`);
-      countParamCount++;
-    }
-    if (industry) {
-      // Map LinkedIn category to NAICS codes
-      const naicsCodes = getNAICSCodesForCategory(industry);
-      if (naicsCodes && naicsCodes.length > 0) {
-        const conditions = naicsCodes.map((code, idx) => `industry LIKE $${countParamCount + idx}`);
-        countQuery += ` AND (${conditions.join(' OR ')})`;
-        naicsCodes.forEach(code => countParams.push(`${code}%`));
-        countParamCount += naicsCodes.length;
-      } else {
-        countQuery += ` AND industry ILIKE $${countParamCount++}`;
-        countParams.push(`%${industry}%`);
-      }
-    }
-    if (company_size) {
-      countQuery += ` AND company_size = $${countParamCount++}`;
-      countParams.push(company_size);
-    }
-    if (revenue) {
-      countQuery += ` AND revenue = $${countParamCount++}`;
-      countParams.push(revenue);
-    }
-    if (search) {
-      countQuery += ` AND (company_name ILIKE $${countParamCount} OR website ILIKE $${countParamCount})`;
-      countParams.push(`%${search}%`);
-    }
-    
-    const countResult = await pool.query(countQuery, countParams);
+    // Count query (reuse same filter clause)
+    const { whereClause: countWhere, params: countParams } = Account._buildFilterClause(filters);
+    const countQuery = `SELECT COUNT(*) FROM accounts ${countWhere}`;
+
+    const [result, countResult] = await Promise.all([
+      pool.query(dataQuery, params),
+      pool.query(countQuery, countParams)
+    ]);
 
     return {
       data: result.rows,
-      total: parseInt(countResult.rows[0].count),
+      total: parseInt(countResult.rows[0].count) || 0,
       limit,
       offset
     };
@@ -181,35 +143,25 @@ class Account {
    */
   static async create(accountData) {
     const {
-      company_name,
-      industry,
-      company_size,
-      country,
-      state_region,
-      city,
-      address,
-      website,
-      phone_number,
-      email_format,
-      revenue,
-      linkedin_url,
-      company_category
+      company_name, industry, company_size, country, state_region,
+      city, district, ward, address, headquarters_address, website,
+      phone_number, email_format, revenue, linkedin_url, company_category
     } = accountData;
 
     const query = `
       INSERT INTO accounts (
         company_name, industry, company_size, country, state_region,
-        city, address, website, phone_number, email_format, revenue,
-        linkedin_url, company_category
+        city, district, ward, address, headquarters_address, website, phone_number,
+        email_format, revenue, linkedin_url, company_category
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
       RETURNING *
     `;
 
     const values = [
       company_name, industry, company_size, country, state_region,
-      city, address, website, phone_number, email_format, revenue,
-      linkedin_url, company_category
+      city, district, ward, address, headquarters_address, website, phone_number,
+      email_format, revenue, linkedin_url, company_category
     ];
 
     const result = await pool.query(query, values);
@@ -220,12 +172,18 @@ class Account {
    * Update account
    */
   static async update(accountId, accountData) {
+    const allowedFields = [
+      'company_name', 'industry', 'company_size', 'country', 'state_region',
+      'city', 'district', 'ward', 'address', 'headquarters_address', 'website',
+      'phone_number', 'email_format', 'revenue', 'linkedin_url', 'company_category'
+    ];
+
     const fields = [];
     const values = [];
     let paramCount = 1;
 
     Object.keys(accountData).forEach(key => {
-      if (accountData[key] !== undefined && key !== 'account_id') {
+      if (accountData[key] !== undefined && allowedFields.includes(key)) {
         fields.push(`${key} = $${paramCount++}`);
         values.push(accountData[key]);
       }
@@ -250,7 +208,7 @@ class Account {
   }
 
   /**
-   * Delete account (cascades to contacts)
+   * Delete account
    */
   static async delete(accountId) {
     const query = 'DELETE FROM accounts WHERE account_id = $1 RETURNING *';
@@ -259,24 +217,29 @@ class Account {
   }
 
   /**
-   * Get filter options (distinct values for dropdowns)
+   * Get filter options
    */
   static async getFilterOptions() {
-    const queries = {
-      countries: 'SELECT DISTINCT country FROM accounts WHERE country IS NOT NULL ORDER BY country',
-      companySizes: 'SELECT DISTINCT company_size FROM accounts WHERE company_size IS NOT NULL ORDER BY company_size',
-      revenues: 'SELECT DISTINCT revenue FROM accounts WHERE revenue IS NOT NULL ORDER BY revenue'
-    };
+    const allCountries = [
+      'United States', 'United Kingdom', 'Canada', 'Australia', 'India',
+      'Germany', 'France', 'Japan', 'China', 'Brazil', 'Mexico', 'Spain',
+      'Italy', 'Netherlands', 'Switzerland', 'Sweden', 'Norway', 'Denmark',
+      'Belgium', 'Austria', 'Poland', 'Russia', 'South Africa', 'Saudi Arabia',
+      'UAE', 'Singapore', 'Hong Kong', 'Thailand', 'Malaysia', 'Indonesia',
+      'Philippines', 'Vietnam', 'South Korea', 'Taiwan', 'Pakistan',
+      'Bangladesh', 'Sri Lanka', 'Afghanistan', 'Iran', 'Turkey', 'Egypt',
+      'Nigeria', 'Kenya', 'Morocco', 'Argentina', 'Chile', 'Colombia',
+      'Peru', 'New Zealand'
+    ];
 
-    const [countries, companySizes, revenues] = await Promise.all([
-      pool.query(queries.countries),
-      pool.query(queries.companySizes),
-      pool.query(queries.revenues)
+    const [companySizes, revenues] = await Promise.all([
+      pool.query('SELECT DISTINCT company_size FROM accounts WHERE company_size IS NOT NULL ORDER BY company_size'),
+      pool.query('SELECT DISTINCT revenue FROM accounts WHERE revenue IS NOT NULL ORDER BY revenue')
     ]);
 
     return {
-      countries: countries.rows.map(r => r.country),
-      industries: getLinkedInCategories(), // Use LinkedIn professional categories
+      countries: allCountries,
+      industries: getLinkedInCategories(),
       companySizes: companySizes.rows.map(r => r.company_size),
       revenues: revenues.rows.map(r => r.revenue),
       regions: [],
@@ -288,13 +251,10 @@ class Account {
    * Get states/regions for a country
    */
   static async getRegionsByCountry(country) {
-    const query = `
-      SELECT DISTINCT state_region 
-      FROM accounts 
-      WHERE country = $1 AND state_region IS NOT NULL 
-      ORDER BY state_region
-    `;
-    const result = await pool.query(query, [country]);
+    const result = await pool.query(
+      'SELECT DISTINCT state_region FROM accounts WHERE country = $1 AND state_region IS NOT NULL ORDER BY state_region',
+      [country]
+    );
     return result.rows.map(r => r.state_region);
   }
 
@@ -302,13 +262,10 @@ class Account {
    * Get cities for a region
    */
   static async getCitiesByRegion(country, state_region) {
-    const query = `
-      SELECT DISTINCT city 
-      FROM accounts 
-      WHERE country = $1 AND state_region = $2 AND city IS NOT NULL 
-      ORDER BY city
-    `;
-    const result = await pool.query(query, [country, state_region]);
+    const result = await pool.query(
+      'SELECT DISTINCT city FROM accounts WHERE country = $1 AND state_region = $2 AND city IS NOT NULL ORDER BY city',
+      [country, state_region]
+    );
     return result.rows.map(r => r.city);
   }
 
@@ -317,7 +274,7 @@ class Account {
    */
   static async getStats() {
     const query = `
-      SELECT 
+      SELECT
         COUNT(*) as total,
         COUNT(DISTINCT country) as countries,
         COUNT(DISTINCT industry) as industries,

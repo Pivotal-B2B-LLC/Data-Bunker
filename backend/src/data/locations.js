@@ -73,6 +73,121 @@ const locations = {
     'New Brunswick': ['Moncton', 'Saint John', 'Fredericton'],
     'Newfoundland and Labrador': ['St. John\'s', 'Mount Pearl', 'Corner Brook'],
     'Prince Edward Island': ['Charlottetown', 'Summerside']
+  },
+  'Afghanistan': {
+    'Kabul': ['Kabul', 'Bagrami', 'Qarabagh', 'Paghman', 'Shakardara', 'Mir Bacha Kot', 'Kalakan'],
+    'Badakhshan': ['Faizabad', 'Baharak', 'Ragh', 'Ishkashim', 'Jurm', 'Keshm'],
+    'Badghis': ['Qala-i-Naw', 'Ghormach', 'Bala Murghab'],
+    'Baghlan': ['Baghlan', 'Puli Khumri', 'Nahrin', 'Khanabad', 'Doshi', 'Taliqan'],
+    'Balkh': ['Mazar-i-Sharif', 'Keleft', 'Sholgara', 'Balkh', 'Nawabad', 'Chimtal'],
+    'Bamyan': ['Bamyan', 'Waras', 'Panjab', 'Saighan'],
+    'Daykundi': ['Nili', 'Khas Uruzgan', 'Shahidan'],
+    'Faryab': ['Maimana', 'Andkhoy', 'Khwaja Sabz Posh', 'Pashtun Kot'],
+    'Farah': ['Farah', 'Lash Gah', 'Anar Darreh', 'Bakwa', 'Bala Baluk'],
+    'Faryab': ['Maimana', 'Andkhoy', 'Almar', 'Thorghundi'],
+    'Ghazni': ['Ghazni', 'Gelan', 'Muqur', 'Jaghatu', 'Deh Yak', 'Nawa'],
+    'Ghor': ['Chaghcharan', 'Firuz Kuh', 'Taywara'],
+    'Helmand': ['Lashkargah', 'Kandahar', 'Naw Zad', 'Sangin', 'Musa Qala'],
+    'Herat': ['Herat', 'Guzarah', 'Injil', 'Kala-e Naw', 'Chesht-e Sharif'],
+    'Jowzjan': ['Sheberghan', 'Aqcha', 'Aybak', 'Faizabad'],
+    'Kandahar': ['Kandahar', 'Spin Boldak', 'Arghandab', 'Dand', 'Panjwai'],
+    'Kapisa': ['Mahmud-i-Raqi', 'Tagab', 'Kapisa', 'Kohestan'],
+    'Khost': ['Khost', 'Matun', 'Sabari', 'Shaul', 'Tani'],
+    'Kunar': ['Asadabad', 'Chawkay', 'Dangam', 'Nari', 'Pech'],
+    'Kunduz': ['Kunduz', 'Aliabad', 'Khanabad', 'Archi'],
+    'Laghman': ['Mihtarlam', 'Alingar', 'Alishang'],
+    'Logar': ['Pule Alam', 'Baraki Barak', 'Mohammad Agha', 'Kharwar'],
+    'Nurestan': ['Parun', 'Wama', 'Barikot'],
+    'Paktia': ['Gardez', 'Lajmangal', 'Parachinar', 'Sharana', 'Jani Khel'],
+    'Paktika': ['Sharan', 'Waza Khwa', 'Orgun', 'Sarobi'],
+    'Panjshir': ['Bazarak', 'Paryan', 'Rukha', 'Kalu'],
+    'Parwan': ['Charikar', 'Bagram', 'Ghorband', 'Salang', 'Surobi'],
+    'Samangan': ['Aybak', 'Dara-i Suf', 'Khulm'],
+    'Sar-e Pul': ['Sar-e Pul', 'Sang Charak', 'Kohistanat'],
+    'Takhar': ['Taluqan', 'Yangi Qala', 'Taloqan', 'Khwaja Ghar'],
+    'Uruzgan': ['Tirin', 'Deh Rawud', 'Khas Uruzgan'],
+    'Wardak': ['Maidan Shahr', 'Chaki Wardak', 'Syed Abad'],
+    'Zabul': ['Qalat', 'Spin Boldak', 'Dai Chopan']
+  },
+  'India': {
+    'Delhi': ['Delhi', 'New Delhi', 'South Delhi', 'East Delhi', 'West Delhi', 'North Delhi'],
+    'Maharashtra': ['Mumbai', 'Pune', 'Nagpur', 'Nashik', 'Thane', 'Aurangabad', 'Kolhapur', 'Solapur'],
+    'Tamil Nadu': ['Chennai', 'Coimbatore', 'Madurai', 'Salem', 'Tiruppur', 'Erode', 'Kanchipuram'],
+    'Karnataka': ['Bangalore', 'Mysore', 'Mangalore', 'Hubli', 'Belgaum', 'Davangere'],
+    'Telangana': ['Hyderabad', 'Secunderabad', 'Warangal', 'Nizamabad', 'Karimnagar'],
+    'Rajasthan': ['Jaipur', 'Jodhpur', 'Udaipur', 'Ajmer', 'Kota', 'Bikaner', 'Alwar'],
+    'Uttar Pradesh': ['Lucknow', 'Kanpur', 'Agra', 'Varanasi', 'Meerut', 'Ghaziabad', 'Allahabad', 'Noida'],
+    'West Bengal': ['Kolkata', 'Darjeeling', 'Siliguri', 'Durgapur', 'Asansol'],
+    'Gujarat': ['Ahmedabad', 'Surat', 'Vadodara', 'Rajkot', 'Baroda', 'Bhavnagar'],
+    'Punjab': ['Chandigarh', 'Amritsar', 'Ludhiana', 'Jalandhar', 'Patiala']
+  },
+  'Pakistan': {
+    'Sindh': ['Karachi', 'Hyderabad', 'Sukkur', 'Larkana', 'Nawabshah'],
+    'Punjab': ['Lahore', 'Faisalabad', 'Multan', 'Rawalpindi', 'Bahawalpur', 'Sargodha', 'Gujranwala'],
+    'Khyber Pakhtunkhwa': ['Peshawar', 'Abbottabad', 'Mardan', 'Kohat', 'Mansehra'],
+    'Balochistan': ['Quetta', 'Ziarat', 'Loralai', 'Kalat'],
+    'Gilgit-Baltistan': ['Gilgit', 'Skardu', 'Hunza']
+  },
+  'Bangladesh': {
+    'Dhaka': ['Dhaka', 'Narayanganj', 'Gazipur', 'Sherpur', 'Tangail'],
+    'Chittagong': ['Chittagong', 'Comilla', 'Sylhet', 'Bandarban'],
+    'Khulna': ['Khulna', 'Jessore', 'Barisal'],
+    'Rajshahi': ['Rajshahi', 'Bogra', 'Dinajpur', 'Rangpur']
+  },
+  'Germany': {
+    'North Rhine-Westphalia': ['Cologne', 'Düsseldorf', 'Dortmund', 'Essen', 'Duisburg', 'Bonn'],
+    'Bavaria': ['Munich', 'Nuremberg', 'Augsburg', 'Regensburg', 'Ingolstadt'],
+    'Baden-Württemberg': ['Stuttgart', 'Mannheim', 'Heidelberg', 'Karlsruhe', 'Ulm'],
+    'Berlin': ['Berlin'],
+    'Hesse': ['Frankfurt', 'Wiesbaden', 'Offenbach'],
+    'Hamburg': ['Hamburg'],
+    'Saxony': ['Dresden', 'Leipzig', 'Chemnitz']
+  },
+  'France': {
+    'Île-de-France': ['Paris', 'Versailles', 'Boulogne-Billancourt'],
+    'Provence-Alpes-Côte d\'Azur': ['Marseille', 'Nice', 'Cannes', 'Toulon'],
+    'Auvergne-Rhône-Alpes': ['Lyon', 'Grenoble', 'Saint-Étienne', 'Villeurbanne'],
+    'Hauts-de-France': ['Lille', 'Roubaix', 'Arras'],
+    'Nouvelle-Aquitaine': ['Bordeaux', 'Toulouse', 'Limoges']
+  },
+  'Australia': {
+    'New South Wales': ['Sydney', 'Newcastle', 'Wollongong', 'Central Coast'],
+    'Victoria': ['Melbourne', 'Geelong', 'Ballarat', 'Bendigo'],
+    'Queensland': ['Brisbane', 'Gold Coast', 'Sunshine Coast', 'Cairns', 'Townsville'],
+    'Western Australia': ['Perth', 'Fremantle', 'Mandurah'],
+    'South Australia': ['Adelaide', 'Gawler'],
+    'Tasmania': ['Hobart', 'Launceston'],
+    'Australian Capital Territory': ['Canberra']
+  },
+  'Japan': {
+    'Tokyo': ['Tokyo', 'Shinjuku', 'Shibuya', 'Minato'],
+    'Osaka': ['Osaka', 'Kobe', 'Kyoto'],
+    'Aichi': ['Nagoya', 'Toyota'],
+    'Fukuoka': ['Fukuoka', 'Kitakyushu'],
+    'Kanagawa': ['Yokohama', 'Kawasaki']
+  },
+  'China': {
+    'Beijing': ['Beijing', 'Chaoyang', 'Dongcheng'],
+    'Shanghai': ['Shanghai', 'Pudong', 'Huangpu'],
+    'Guangdong': ['Guangzhou', 'Shenzhen', 'Foshan', 'Dongguan'],
+    'Sichuan': ['Chengdu', 'Mianyang'],
+    'Zhejiang': ['Hangzhou', 'Ningbo', 'Wenzhou'],
+    'Jiangsu': ['Nanjing', 'Suzhou', 'Wuxi']
+  },
+  'Mexico': {
+    'Mexico City': ['Mexico City', 'Benito Juárez'],
+    'State of Mexico': ['Toluca', 'Ecatepec'],
+    'Jalisco': ['Guadalajara', 'Puerto Vallarta', 'Zapopan'],
+    'Nuevo León': ['Monterrey', 'San Pedro Garza García'],
+    'Veracruz': ['Veracruz', 'Xalapa'],
+    'Quintana Roo': ['Cancún', 'Playa del Carmen']
+  },
+  'Brazil': {
+    'São Paulo': ['São Paulo', 'Campinas', 'Santos'],
+    'Rio de Janeiro': ['Rio de Janeiro', 'Niterói', 'Duque de Caxias'],
+    'Minas Gerais': ['Belo Horizonte', 'Contagem', 'Betim'],
+    'Bahia': ['Salvador', 'Feira de Santana', 'Vitória da Conquista'],
+    'Rio Grande do Sul': ['Porto Alegre', 'Caxias do Sul']
   }
 };
 

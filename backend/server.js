@@ -9,8 +9,9 @@ const dotenv = require('dotenv');
 const rateLimit = require('express-rate-limit');
 const cron = require('node-cron');
 
-// Load environment variables
-dotenv.config();
+// Load environment variables (use __dirname so it works regardless of CWD)
+const path = require('path');
+dotenv.config({ path: path.join(__dirname, '.env') });
 
 // Initialize Express app
 const app = express();
@@ -20,11 +21,12 @@ const PORT = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json());
 
-// Rate limiting
+// Rate limiting — generous limits so the AI page and dashboard polling work
 const limiter = rateLimit({
-  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || 3600000),
-  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || 100),
-  message: 'Too many requests, please try again later.'
+  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || 900000), // 15 min window
+  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || 2000),     // 2000 per window
+  message: 'Too many requests, please try again later.',
+  skip: (req) => req.path.startsWith('/api/llm') || req.path.startsWith('/api/scraper'),
 });
 app.use('/api/', limiter);
 
@@ -123,6 +125,41 @@ app.use('/api/discovery', require('./src/routes/discovery')); // Company discove
 app.use('/api/accounts', require('./src/routes/accounts'));
 app.use('/api/contacts', require('./src/routes/contacts'));
 app.use('/api/dashboard', require('./src/routes/dashboard')); // Geographic dashboard
+app.use('/api/analytics', require('./src/routes/analytics')); // Analytics endpoints
+app.use('/api/export', require('./src/routes/export')); // CSV/JSON export
+app.use('/api/enriched', require('./src/routes/enriched')); // Enriched data view
+app.use('/api/llm',     require('./src/routes/llm'));     // Local Llama 3.2 AI endpoint
+app.use('/api/scraper', require('./src/routes/scraper')); // Browser extension scraper endpoint
+app.use('/api/agents',  require('./src/routes/agents'));  // Army — agent control panel
+
+// Extension download endpoint
+app.get('/api/extension/download', (req, res) => {
+  const { exec } = require('child_process');
+  const os = require('os');
+  const fs = require('fs');
+  const extensionDir = path.join(__dirname, '..', 'extension');
+  const outputPath = path.join(os.tmpdir(), 'data-bunker-extension.zip');
+
+  // Remove stale zip if it exists
+  if (fs.existsSync(outputPath)) {
+    try { fs.unlinkSync(outputPath); } catch (_) {}
+  }
+
+  exec(
+    `zip -r "${outputPath}" . -x "*.DS_Store"`,
+    { cwd: extensionDir },
+    (err) => {
+      if (err) {
+        console.error('Extension zip error:', err);
+        return res.status(500).json({ error: 'Failed to create extension zip' });
+      }
+      res.download(outputPath, 'data-bunker-extension.zip', (dlErr) => {
+        if (dlErr) console.error('Extension download error:', dlErr);
+        try { fs.unlinkSync(outputPath); } catch (_) {}
+      });
+    }
+  );
+});
 
 // 404 handler
 app.use((req, res) => {
@@ -148,6 +185,7 @@ const db = require('./src/db/database');
 const webTrackingService = require('./src/services/webTrackingService');
 const bulkImportService = require('./src/services/bulkImportService');
 const companyEnrichmentService = require('./src/services/companyEnrichmentService');
+const ollama = require('./src/services/ollamaService');
 
 // Start server
 app.listen(PORT, async () => {
@@ -161,6 +199,18 @@ app.listen(PORT, async () => {
 ║ 🗄️  Database: ${process.env.POSTGRES_DB || 'Not configured'}
 ╚════════════════════════════════════════╝
   `);
+
+  // Check LLM availability
+  try {
+    const llmAvailable = await ollama.isAvailable();
+    if (llmAvailable) {
+      console.log(`✅ Llama 3.2 1B ready via Ollama (model: ${ollama.model})`);
+    } else {
+      console.warn('⚠️  Ollama not running — start it with: ollama serve');
+    }
+  } catch {
+    console.warn('⚠️  Could not connect to Ollama');
+  }
 
   // Test database connection
   try {

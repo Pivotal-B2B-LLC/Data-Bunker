@@ -248,14 +248,17 @@ class CompanyRepository {
    * Get companies that need updating
    */
   async getStaleCompanies(daysOld = 30, limit = 100) {
+    // Sanitize daysOld to prevent SQL injection - must be a positive integer
+    const safeDays = Math.max(1, Math.min(365, parseInt(daysOld) || 30));
+
     const query = `
       SELECT * FROM companies
-      WHERE last_updated < NOW() - INTERVAL '${daysOld} days'
+      WHERE last_updated < NOW() - ($1 || ' days')::INTERVAL
       ORDER BY last_updated ASC
-      LIMIT $1
+      LIMIT $2
     `;
 
-    const result = await db.query(query, [limit]);
+    const result = await db.query(query, [safeDays.toString(), limit]);
     return result.rows;
   }
 
@@ -311,7 +314,7 @@ class CompanyRepository {
       db.query('SELECT COUNT(*) as total FROM contacts'),
       db.query('SELECT COUNT(*) as total FROM officers'),
       db.query('SELECT COUNT(*) as total FROM tracking_history'),
-      db.query(`SELECT COUNT(*) as stale FROM companies WHERE last_updated < NOW() - INTERVAL '30 days'`)
+      db.query(`SELECT COUNT(*) as stale FROM companies WHERE last_updated < NOW() - INTERVAL '30 days'`) // hardcoded literal is safe
     ];
 
     const results = await Promise.all(queries);
