@@ -8,7 +8,7 @@ import ContactsPage from './pages/ContactsPage';
 import EnrichmentPage from './pages/EnrichmentPage';
 import AIPage from './pages/AIPage';
 import ExtensionPage from './pages/ExtensionPage';
-import ArmyPage from './pages/ArmyPage';
+import AgentsPage from './pages/AgentsPage';
 import './App.css';
 
 const NAV_ITEMS = [
@@ -19,7 +19,7 @@ const NAV_ITEMS = [
   { to: '/discovery',  icon: '🔭',  label: 'Discovery' },
   { to: '/enrichment', icon: '✦',   label: 'AI Enrichment' },
   { to: '/extension', icon: '🧩',  label: 'Extension' },
-  { to: '/army',      icon: '⚔️',  label: 'Army' },
+  { to: '/agents',      icon: '⚔️',  label: 'Agents' },
 ];
 
 function Sidebar() {
@@ -77,7 +77,7 @@ function Topbar({ theme, toggleTheme }) {
     '/': 'Home', '/ai': 'AI Assistant', '/accounts': 'Accounts',
     '/contacts': 'Contacts', '/discovery': 'Discovery', '/enrichment': 'AI Enrichment',
     '/extension': 'Extension Download',
-    '/army': 'Army — Agent Control',
+    '/agents': 'Agents — Agent Control',
   };
   const title = titles[location.pathname] || 'Data Bunker';
 
@@ -135,7 +135,7 @@ function App() {
               <Route path="/contacts" element={<ContactsPage />} />
               <Route path="/enrichment" element={<EnrichmentPage />} />
               <Route path="/extension" element={<ExtensionPage />} />
-              <Route path="/army" element={<ArmyPage />} />
+              <Route path="/agents" element={<AgentsPage />} />
             </Routes>
           </main>
         </div>

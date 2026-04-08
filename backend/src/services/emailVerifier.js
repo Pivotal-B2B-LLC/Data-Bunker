@@ -10,6 +10,7 @@
 
 const dns = require('dns').promises;
 const net = require('net');
+const crypto = require('crypto');
 
 // Common disposable email domains
 const DISPOSABLE_DOMAINS = new Set([
@@ -143,6 +144,134 @@ async function smtpVerify(email, mxHost, timeout = 5000) {
   });
 }
 
+function normalizeDomain(input) {
+  if (!input || typeof input !== 'string') return null;
+  const value = input.toLowerCase().trim();
+  const domain = value.includes('@') ? value.split('@')[1] : value;
+  return domain
+    .replace(/^https?:\/\//, '')
+    .replace(/^www\./, '')
+    .split('/')[0]
+    .split('?')[0]
+    .trim() || null;
+}
+
+async function detectCatchAll(domainOrEmail, mxRecordsArg = null, timeout = 5000) {
+  const domain = normalizeDomain(domainOrEmail);
+  if (!domain) return false;
+
+  const mxRecords = mxRecordsArg || await getMxRecords(domain);
+  if (!mxRecords || mxRecords.length === 0) return false;
+
+  const randomLocalA = `db-${crypto.randomBytes(8).toString('hex')}`;
+  const randomLocalB = `db-${crypto.randomBytes(8).toString('hex')}`;
+  const probes = [`${randomLocalA}@${domain}`, `${randomLocalB}@${domain}`];
+
+  for (let i = 0; i < Math.min(2, mxRecords.length); i++) {
+    for (const probe of probes) {
+      try {
+        const result = await smtpVerify(probe, mxRecords[i].exchange, timeout);
+        if (result.valid === true) return true;
+      } catch (_) {}
+    }
+  }
+
+  return false;
+}
+
+async function verifyEmailDetailed(email, options = {}) {
+  const timeout = options.timeout || 5000;
+  const result = {
+    email: email?.toLowerCase().trim(),
+    valid: false,
+    syntax_valid: false,
+    mx_valid: false,
+    smtp_verified: null,
+    is_disposable: false,
+    is_catch_all: false,
+    provider_type: 'business',
+    reason: '',
+    score: 0,
+    domain: null,
+    mx_hosts: [],
+  };
+
+  if (!isValidSyntax(email)) {
+    result.reason = 'invalid_syntax';
+    return result;
+  }
+
+  result.syntax_valid = true;
+  result.score += 20;
+  result.domain = normalizeDomain(email);
+
+  if (isDisposable(email)) {
+    result.is_disposable = true;
+    result.reason = 'disposable_email';
+    return result;
+  }
+
+  result.score += 10;
+
+  const mxRecords = await getMxRecords(result.domain);
+  if (!mxRecords || mxRecords.length === 0) {
+    result.reason = 'no_mx_records';
+    return result;
+  }
+
+  result.mx_valid = true;
+  result.mx_hosts = mxRecords.map(r => r.exchange);
+  result.score += 20;
+
+  const consumerProvider = isCatchAll(email);
+  if (consumerProvider) {
+    result.provider_type = 'consumer';
+  }
+
+  for (let i = 0; i < Math.min(2, mxRecords.length); i++) {
+    try {
+      const smtpResult = await smtpVerify(email, mxRecords[i].exchange, timeout);
+      result.smtp_verified = smtpResult.valid;
+
+      if (smtpResult.valid === true) {
+        result.valid = true;
+        result.reason = 'smtp_verified';
+        result.score += 45;
+        break;
+      }
+
+      if (smtpResult.valid === false && smtpResult.reason === 'mailbox_not_found') {
+        result.valid = false;
+        result.reason = 'mailbox_not_found';
+        return result;
+      }
+
+      if (!result.reason) result.reason = smtpResult.reason;
+    } catch (_) {}
+  }
+
+  if (options.detectCatchAll !== false) {
+    try {
+      result.is_catch_all = await detectCatchAll(result.domain, mxRecords, timeout);
+      if (result.is_catch_all) {
+        result.reason = result.smtp_verified === true ? 'smtp_verified_on_catch_all' : 'catch_all_domain';
+      }
+    } catch (_) {}
+  }
+
+  if (result.smtp_verified === null && result.mx_valid) {
+    result.valid = true;
+    result.reason = result.is_catch_all ? 'catch_all_domain' : 'mx_valid_smtp_unknown';
+    result.score += result.is_catch_all ? 5 : 20;
+  }
+
+  if (result.provider_type === 'consumer') {
+    result.score += 5;
+  }
+
+  return result;
+}
+
 /**
  * Full email verification
  * Returns verification result object
@@ -253,9 +382,13 @@ async function verifyEmails(emails, concurrency = 5) {
 
 module.exports = {
   verifyEmail,
+  verifyEmailDetailed,
   verifyEmails,
   isValidSyntax,
   isDisposable,
   isCatchAll,
-  getMxRecords
+  getMxRecords,
+  smtpVerify,
+  detectCatchAll,
+  normalizeDomain,
 };

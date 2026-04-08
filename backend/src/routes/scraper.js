@@ -11,6 +11,8 @@ const express = require('express');
 const router  = express.Router();
 const { pool } = require('../db/connection');
 const qwen    = require('../services/qwenService');
+const emailIntelligence = require('../services/emailIntelligenceService');
+const validator = require('../services/dataValidator');
 
 // ── One-time column + index migration (runs on first import) ──────────────────
 let migrationDone = false;
@@ -47,6 +49,8 @@ router.post('/people', async (req, res) => {
   }
 
   const stats = { saved: 0, updated: 0, companies: 0, skipped: 0, enriched: 0 };
+  const touchedContactIds = [];
+  const touchedAccountIds = [];
   const client = await pool.connect();
 
   // Check Qwen once per request batch — avoids per-person overhead
@@ -60,16 +64,34 @@ router.post('/people', async (req, res) => {
 
       // Support both 'subtitle' (extension format) and pre-parsed 'jobTitle'+'company'
       if (!jobTitle && !company && subtitle) {
-        const atIdx = subtitle.indexOf(' at ');
-        if (atIdx !== -1) {
-          jobTitle = jobTitle || subtitle.slice(0, atIdx).trim();
-          company  = company  || subtitle.slice(atIdx + 4).trim();
+        const atMatch = subtitle.match(/^(.+?)\s+(?:at|@)\s+(.+)$/i);
+        if (atMatch) {
+          jobTitle = jobTitle || atMatch[1].trim();
+          company  = company  || atMatch[2].split(/[·•\n]/)[0].trim();
         } else {
           jobTitle = jobTitle || subtitle.trim();
         }
       }
 
       // ── Skip only if truly no name ────────────────────────────
+      if (!fullName || fullName.length < 2) { stats.skipped++; continue; }
+
+      // ── VALIDATE: clean name, job title, company, location ──
+      const nameResult = validator.validateName(fullName);
+      fullName = nameResult.name;
+      if (nameResult.overflow && !jobTitle) {
+        const atMatch = nameResult.overflow.match(/^(.+?)\s+(?:at|@)\s+(.+)$/i);
+        if (atMatch) {
+          jobTitle = atMatch[1].trim();
+          if (!company) company = atMatch[2].split(/[·•\n]/)[0].trim();
+        } else {
+          jobTitle = nameResult.overflow;
+        }
+      }
+      jobTitle = validator.validateJobTitle(jobTitle);
+      company = validator.validateCompany(company) || 'Unknown';
+      location = validator.validateLocation(location) || location;
+
       if (!fullName || fullName.length < 2) { stats.skipped++; continue; }
 
       // ── AI enrichment: call Qwen to extract full contact info ──────────────
@@ -99,12 +121,12 @@ router.post('/people', async (req, res) => {
       // ── Fast regex fallback: extract company from rawSnippet or subtitle ──
       if (!company || company.length < 2) {
         const snippet = rawSnippet || subtitle || '';
-        const atMatch = snippet.match(/\bat\s+([A-Z][^\n·•]{2,60})/);
+        const atMatch = snippet.match(/\b(?:at|@)\s+([A-Z][^\n·•]{2,60})/);
         if (atMatch) company = atMatch[1].split(/[·•\n]/)[0].trim();
       }
 
       // If still no company, use placeholder — never skip a real person
-      if (!company || company.length < 2) company = 'LinkedIn Contact';
+      if (!company || company.length < 2) company = 'Unknown';
 
       // ── Parse name ───────────────────────────────────────────
       const parts     = fullName.trim().split(/\s+/);
@@ -126,6 +148,7 @@ router.post('/people', async (req, res) => {
           source,
         });
         if (accountId.isNew) stats.companies++;
+        touchedAccountIds.push(accountId.id);
         accountId = accountId.id;
       } catch (e) {
         stats.skipped++;
@@ -162,6 +185,8 @@ router.post('/people', async (req, res) => {
             aiSeniority, aiIndustry, aiEmailFmtGuess,
             source]);
 
+        if (r.rows[0]?.contact_id) touchedContactIds.push(r.rows[0].contact_id);
+
         if (r.rows[0]?.is_new) stats.saved++;
         else                   stats.updated++;
       } else {
@@ -185,12 +210,34 @@ router.post('/people', async (req, res) => {
             accountId, aiSeniority, aiIndustry, aiEmailFmtGuess,
             source]);
 
+        if (r.rows[0]?.contact_id) touchedContactIds.push(r.rows[0].contact_id);
+
         if (r.rows.length > 0) stats.saved++;
         else                   stats.skipped++;
       }
     }
 
     await client.query('COMMIT');
+
+    if (touchedContactIds.length > 0 || touchedAccountIds.length > 0) {
+      setImmediate(async () => {
+        const contactIds = [...new Set(touchedContactIds)];
+        const accountIds = [...new Set(touchedAccountIds)];
+
+        for (const accountId of accountIds) {
+          await emailIntelligence.analyzeAccount(accountId).catch(() => {});
+        }
+        for (const contactId of contactIds) {
+          const contact = await pool.query('SELECT email FROM contacts WHERE contact_id = $1', [contactId]).catch(() => ({ rows: [] }));
+          if (contact.rows[0]?.email) {
+            await emailIntelligence.verifyContactEmail(contactId).catch(() => {});
+          } else {
+            await emailIntelligence.findForContact(contactId, { save: true }).catch(() => {});
+          }
+        }
+      });
+    }
+
     res.json({ ok: true, ...stats });
   } catch (e) {
     await client.query('ROLLBACK');
@@ -533,12 +580,15 @@ router.post('/universal', async (req, res) => {
 router.post('/leads', async (req, res) => {
   await ensureSchema();
 
-  const { blocks, url, strategy, source } = req.body;
+  const { blocks, url, strategy, source, filters } = req.body;
   if (!Array.isArray(blocks) || !blocks.length) {
     return res.status(400).json({ error: 'blocks array required' });
   }
 
-  const stats = { saved: 0, updated: 0, skipped: 0, companies: 0, enriched: 0 };
+  const stats = { saved: 0, updated: 0, skipped: 0, companies: 0, enriched: 0, queued: 0 };
+  const newAccountIds = [];   // track new companies for auto-enrichment
+  const touchedContactIds = [];
+  const touchedAccountIds = [];
   const qwenOnline = await qwen.isAvailable().catch(() => false);
   const client = await pool.connect();
 
@@ -548,7 +598,7 @@ router.post('/leads', async (req, res) => {
     for (const block of blocks) {
       try {
         // ── Step 1: Parse lead from block (regex first, then AI fallback) ──
-        const lead = parseLeadBlock(block, strategy);
+        const lead = parseLeadBlock(block, strategy, filters);
 
         // ── Step 2: AI enrichment if Qwen is available ──
         if (qwenOnline && lead.rawText) {
@@ -586,16 +636,16 @@ router.post('/leads', async (req, res) => {
 
         // ── Step 4: Ensure company exists ──
         if (!lead.company || lead.company.length < 2) {
-          // Extract from subtitle "Title at Company"
+          // Extract from subtitle "Title at/@ Company"
           if (lead.subtitle) {
-            const atIdx = lead.subtitle.lastIndexOf(' at ');
-            if (atIdx > 0) lead.company = lead.subtitle.slice(atIdx + 4).trim();
+            const atMatch = lead.subtitle.match(/^(.+?)\s+(?:at|@)\s+(.+)$/i);
+            if (atMatch) lead.company = atMatch[2].split(/[·•\n]/)[0].trim();
           }
         }
-        if (!lead.company || lead.company.length < 2) lead.company = source || 'Unknown';
+        if (!lead.company || lead.company.length < 2) lead.company = 'Unknown';
 
         // Ensure job_title is never null (DB trigger enforces this)
-        if (!lead.jobTitle || lead.jobTitle.trim().length < 1) lead.jobTitle = 'Unknown';
+        if (!lead.jobTitle || lead.jobTitle.trim().length < 1) lead.jobTitle = '';
 
         let accountId;
         try {
@@ -606,7 +656,8 @@ router.post('/leads', async (req, res) => {
             industry: lead.industry || null,
             source: source || strategy || 'extension',
           });
-          if (accountId.isNew) stats.companies++;
+          if (accountId.isNew) { stats.companies++; newAccountIds.push(accountId.id); }
+          touchedAccountIds.push(accountId.id);
           accountId = accountId.id;
         } catch (e) { stats.skipped++; continue; }
 
@@ -639,6 +690,7 @@ router.post('/leads', async (req, res) => {
             lead.seniority || null, lead.industry || null, lead.emailFormatGuess || null,
             source || strategy || 'extension'
           ]);
+          if (r.rows[0]?.contact_id) touchedContactIds.push(r.rows[0].contact_id);
           if (r.rows[0]?.is_new) stats.saved++;
           else stats.updated++;
         } else {
@@ -663,6 +715,7 @@ router.post('/leads', async (req, res) => {
             accountId, lead.seniority || null, lead.industry || null, lead.emailFormatGuess || null,
             source || strategy || 'extension'
           ]);
+          if (r.rows[0]?.contact_id) touchedContactIds.push(r.rows[0].contact_id);
           if (r.rows.length > 0) stats.saved++;
           else stats.skipped++;
         }
@@ -673,7 +726,60 @@ router.post('/leads', async (req, res) => {
     }
 
     await client.query('COMMIT');
-    console.log(`[leads] Processed ${blocks.length} blocks: ${stats.saved} saved, ${stats.updated} updated, ${stats.skipped} skipped, ${stats.enriched} AI-enriched`);
+
+    if (touchedContactIds.length > 0 || touchedAccountIds.length > 0) {
+      setImmediate(async () => {
+        const contactIds = [...new Set(touchedContactIds)];
+        const accountIds = [...new Set(touchedAccountIds)];
+
+        for (const accountId of accountIds) {
+          await emailIntelligence.analyzeAccount(accountId).catch(() => {});
+        }
+        for (const contactId of contactIds) {
+          const contact = await pool.query('SELECT email FROM contacts WHERE contact_id = $1', [contactId]).catch(() => ({ rows: [] }));
+          if (contact.rows[0]?.email) {
+            await emailIntelligence.verifyContactEmail(contactId).catch(() => {});
+          } else {
+            await emailIntelligence.findForContact(contactId, { save: true }).catch(() => {});
+          }
+        }
+      });
+    }
+
+    // ── Auto-queue new companies for enrichment (fire-and-forget) ──
+    if (newAccountIds.length > 0) {
+      (async () => {
+        try {
+          await pool.query(`
+            CREATE TABLE IF NOT EXISTS enrichment_queue_v2 (
+              id SERIAL PRIMARY KEY,
+              company_id INTEGER NOT NULL,
+              priority INTEGER DEFAULT 0,
+              status VARCHAR(50) DEFAULT 'pending',
+              retry_count INTEGER DEFAULT 0,
+              last_attempt TIMESTAMP,
+              error_message TEXT,
+              worker_id VARCHAR(100),
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              UNIQUE(company_id)
+            )
+          `);
+          const r = await pool.query(`
+            INSERT INTO enrichment_queue_v2 (company_id, priority, status)
+            SELECT unnest($1::int[]), 1, 'pending'
+            ON CONFLICT (company_id) DO NOTHING
+            RETURNING company_id
+          `, [newAccountIds]);
+          const queued = r.rowCount || 0;
+          if (queued > 0) console.log(`[leads] Auto-queued ${queued} new companies for enrichment`);
+          stats.queued = queued;
+        } catch (qErr) {
+          console.warn('[leads] Auto-queue enrichment failed (non-fatal):', qErr.message);
+        }
+      })();
+    }
+
+    console.log(`[leads] Processed ${blocks.length} blocks: ${stats.saved} saved, ${stats.updated} updated, ${stats.skipped} skipped, ${stats.enriched} AI-enriched, ${newAccountIds.length} new companies`);
     res.json({ ok: true, ...stats });
   } catch (e) {
     await client.query('ROLLBACK').catch(() => {});
@@ -688,7 +794,7 @@ router.post('/leads', async (req, res) => {
  * Parse a raw lead block into structured fields using regex.
  * Works across all site strategies — LinkedIn cards, Maps listings, generic cards.
  */
-function parseLeadBlock(block, strategy) {
+function parseLeadBlock(block, strategy, filters) {
   const lead = {
     fullName: '', firstName: '', lastName: '',
     jobTitle: '', company: '', email: '', phone: '',
@@ -712,19 +818,55 @@ function parseLeadBlock(block, strategy) {
   if (block.linkedinUrl) lead.linkedinUrl = block.linkedinUrl;
 
   // Parse subtitle → jobTitle + company
+  // ONLY extract company from explicit "Title at Company" pattern.
+  // Never guess company from rawText — wrong companies are worse than no company.
   if (lead.subtitle) {
-    const atIdx = lead.subtitle.lastIndexOf(' at ');
-    if (atIdx > 0) {
-      lead.jobTitle = lead.subtitle.slice(0, atIdx).trim();
-      lead.company = lead.subtitle.slice(atIdx + 4).split(/[·•\n]/)[0].trim();
+    const atMatch = lead.subtitle.match(/^(.+?)\s+(?:at|@)\s+(.+)$/i);
+    if (atMatch) {
+      lead.jobTitle = atMatch[1].trim();
+      lead.company = atMatch[2].split(/[·•\n]/)[0].trim();
     } else {
       lead.jobTitle = lead.subtitle;
     }
   }
 
-  // Parse name → first + last
+  // Fallback: extract job title from rawText ONLY (never company)
+  if (!lead.jobTitle && lead.rawText) {
+    const lines = lead.rawText.split(/[·\n]/).map(l => l.trim()).filter(Boolean);
+    for (let i = 0; i < Math.min(lines.length, 6); i++) {
+      const line = lines[i];
+      if (!line || line.length < 3) continue;
+      if (lead.fullName && line.toLowerCase() === lead.fullName.toLowerCase()) continue;
+      if (/connect|follow|message|degree|mutual|view/i.test(line)) continue;
+      if (/^\d+\s*(connection|follower|mutual)/i.test(line)) continue;
+      // "Title at/@ Company" pattern — extract BOTH
+      const atMatch = line.match(/^(.{3,60})\s+(?:at|@)\s+(.{2,60})$/i);
+      if (atMatch) {
+        lead.jobTitle = atMatch[1].trim();
+        if (!lead.company) lead.company = atMatch[2].split(/[·•,]/)[0].trim();
+        break;
+      }
+      // Otherwise just take it as job title — DO NOT extract company
+      if (/^[A-Z]/.test(line) && line.length > 3 && line.length < 100) {
+        lead.jobTitle = line;
+        break;
+      }
+    }
+  }
+
+  // Parse name → first + last (with sanitization)
   if (lead.fullName) {
-    const parts = lead.fullName.trim().split(/\s+/);
+    let fn = lead.fullName.trim()
+      .replace(/^[\s\u2022\u00b7\-\u2013\u2014|]+/, '')
+      .replace(/[\s\u2022\u00b7\-\u2013\u2014|]+$/, '')
+      .replace(/\b\d+(st|nd|rd|th)\+?\b/gi, '')
+      .replace(/<[^>]*>/g, '')
+      .replace(/[^a-zA-Z\u00C0-\u00FF\s'.\-]/g, '')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+    if (fn.length > 60) fn = fn.slice(0, 60).replace(/\s\S*$/, '').trim();
+    lead.fullName = fn;
+    const parts = fn.split(/\s+/);
     lead.firstName = parts[0] || '';
     lead.lastName = parts.slice(1).join(' ') || '';
   }
@@ -750,10 +892,8 @@ function parseLeadBlock(block, strategy) {
         lead.lastName = parts.slice(1).join(' ');
       }
     }
-    if (!lead.company && !lead.subtitle) {
-      const atMatch = text.match(/\bat\s+([A-Z][^\n·•,]{2,50})/);
-      if (atMatch) lead.company = atMatch[1].trim();
-    }
+    // NOTE: We do NOT extract company from rawText — only from explicit "at/@ Company"
+    // in the subtitle. Wrong companies are worse than no company.
   }
 
   // Maps-specific: use business name as company
@@ -764,7 +904,36 @@ function parseLeadBlock(block, strategy) {
     lead.lastName = '';
   }
 
-  return lead;
+  // Use page-level filters to supplement missing data
+  if (filters) {
+    if (!lead.industry && filters.industry) {
+      // Only use industry if it looks like a real name, not a LinkedIn code like ["25"]
+      const ind = String(filters.industry).replace(/^[\["\]]+|[\["\]]+$/g, '').trim();
+      if (ind.length > 1 && !/^\d+$/.test(ind)) lead.industry = ind;
+    }
+    if (!lead.city && !lead.country && filters.locationText) {
+      const loc = splitLocation(filters.locationText);
+      if (loc.city) lead.city = loc.city;
+      if (loc.country) lead.country = loc.country;
+    }
+  }
+
+  // ── VALIDATION: clean every field before saving ──
+  return validator.validateLead(lead);
 }
+
+// ── POST /api/scraper/cleanup — Fix all existing bad data in the database ─────
+router.post('/cleanup', async (req, res) => {
+  try {
+    console.log('[scraper] Running data cleanup...');
+    const results = await validator.cleanExistingData(pool);
+    const totalFixed = results.reduce((s, r) => s + (r.rowsAffected || 0), 0);
+    console.log(`[scraper] Cleanup done: ${totalFixed} rows fixed`);
+    res.json({ ok: true, totalFixed, details: results });
+  } catch (e) {
+    console.error('[scraper] Cleanup error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
 
 module.exports = router;

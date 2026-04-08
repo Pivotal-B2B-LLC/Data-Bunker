@@ -13,9 +13,8 @@
 
 require('dotenv').config({ path: require('path').join(__dirname, '../../.env') });
 const { pool } = require('../../src/db/connection');
-const dns = require('dns').promises;
-const net = require('net');
 const TURBO_CONFIG = require('./turbo-config');
+const emailIntelligence = require('../../src/services/emailIntelligenceService');
 
 const AGENT_NAME = 'EMAIL-FINDER';
 const CONFIG = TURBO_CONFIG.EMAIL;
@@ -34,129 +33,13 @@ function log(msg) {
   console.log(`[${time}] [${AGENT_NAME}] ${msg}`);
 }
 
-// Generate email permutations
-function generateEmailPatterns(firstName, lastName, domain) {
-  const f = firstName.toLowerCase().replace(/[^a-z]/g, '');
-  const l = lastName.toLowerCase().replace(/[^a-z]/g, '');
-
-  if (!f || !l || !domain) return [];
-
-  const fi = f.charAt(0);
-  const li = l.charAt(0);
-
-  return [
-    `${f}.${l}@${domain}`,           // john.smith@
-    `${f}${l}@${domain}`,            // johnsmith@
-    `${fi}${l}@${domain}`,           // jsmith@
-    `${f}${li}@${domain}`,           // johns@
-    `${fi}.${l}@${domain}`,          // j.smith@
-    `${f}_${l}@${domain}`,           // john_smith@
-    `${l}.${f}@${domain}`,           // smith.john@
-    `${l}${f}@${domain}`,            // smithjohn@
-    `${f}-${l}@${domain}`,           // john-smith@
-    `${fi}${l}${fi}@${domain}`,      // jsmithj@ (rare)
-    `${f}@${domain}`,                // john@
-    `${l}@${domain}`,                // smith@
-  ];
-}
-
-// Get MX records for domain
-async function getMxRecords(domain) {
-  try {
-    const records = await dns.resolveMx(domain);
-    if (records && records.length > 0) {
-      records.sort((a, b) => a.priority - b.priority);
-      return records[0].exchange;
-    }
-  } catch (e) {}
-  return null;
-}
-
-// Verify email via SMTP
-async function verifyEmailSMTP(email, mxHost) {
-  return new Promise((resolve) => {
-    const socket = new net.Socket();
-    let resolved = false;
-    let response = '';
-
-    const finish = (result) => {
-      if (!resolved) {
-        resolved = true;
-        socket.destroy();
-        resolve(result);
-      }
-    };
-
-    socket.setTimeout(CONFIG.SMTP_TIMEOUT);
-
-    socket.on('timeout', () => finish({ valid: false, reason: 'timeout' }));
-    socket.on('error', () => finish({ valid: false, reason: 'connection_error' }));
-
-    socket.on('data', (data) => {
-      response += data.toString();
-
-      if (response.includes('220') && !response.includes('HELO')) {
-        socket.write('HELO verify.local\r\n');
-      } else if (response.includes('250') && response.includes('HELO')) {
-        socket.write('MAIL FROM:<verify@verify.local>\r\n');
-      } else if (response.includes('250') && response.includes('MAIL FROM')) {
-        socket.write(`RCPT TO:<${email}>\r\n`);
-      } else if (response.includes('RCPT TO')) {
-        if (response.includes('250')) {
-          finish({ valid: true, reason: 'accepted' });
-        } else if (response.includes('550') || response.includes('551') || response.includes('552') || response.includes('553')) {
-          finish({ valid: false, reason: 'mailbox_not_found' });
-        } else if (response.includes('450') || response.includes('451') || response.includes('452')) {
-          finish({ valid: false, reason: 'temporary_error' });
-        } else {
-          finish({ valid: false, reason: 'rejected' });
-        }
-      }
-    });
-
-    socket.connect(25, mxHost, () => {});
-  });
-}
-
 // Find email for a contact
 async function findEmailForContact(contact) {
-  if (!contact.first_name || !contact.last_name) return null;
-
-  // Get company domain
-  const companyResult = await pool.query(
-    'SELECT website FROM accounts WHERE account_id = $1',
-    [contact.linked_account_id]
-  );
-
-  if (companyResult.rows.length === 0 || !companyResult.rows[0].website) return null;
-
-  const website = companyResult.rows[0].website;
-  const domain = website.toLowerCase()
-    .replace(/^https?:\/\//, '')
-    .replace(/^www\./, '')
-    .split('/')[0];
-
-  if (!domain || !domain.includes('.')) return null;
-
-  // Get MX server
-  const mxHost = await getMxRecords(domain);
-  if (!mxHost) return { email: null, reason: 'no_mx_records' };
-
-  // Generate and test email patterns
-  const patterns = generateEmailPatterns(contact.first_name, contact.last_name, domain);
-
-  for (const email of patterns) {
-    try {
-      const result = await verifyEmailSMTP(email, mxHost);
-      if (result.valid) {
-        return { email, reason: 'verified' };
-      }
-    } catch (e) {
-      // Continue to next pattern
-    }
+  const found = await emailIntelligence.findForContact(contact.contact_id, { save: true });
+  if (found.best && found.best.confidence !== 'invalid') {
+    return { email: found.best.email, reason: found.best.confidence, score: found.best.score };
   }
-
-  return { email: null, reason: 'not_found' };
+  return { email: null, reason: found.error || 'not_found' };
 }
 
 async function getContactsWithoutEmail() {
@@ -177,6 +60,7 @@ async function updateContactEmail(contactId, email) {
     'UPDATE contacts SET email = $1, updated_at = NOW() WHERE contact_id = $2',
     [email, contactId]
   );
+  await emailIntelligence.verifyContactEmail(contactId).catch(() => {});
 }
 
 function printStats() {

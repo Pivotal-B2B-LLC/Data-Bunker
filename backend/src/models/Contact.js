@@ -4,6 +4,7 @@
  */
 
 const { pool } = require('../db/connection');
+const emailIntelligence = require('../services/emailIntelligenceService');
 
 class Contact {
   /**
@@ -181,7 +182,17 @@ class Contact {
     ];
 
     const result = await pool.query(query, values);
-    return result.rows[0];
+    const contact = result.rows[0];
+
+    try {
+      if (contact.email) {
+        await emailIntelligence.verifyContactEmail(contact.contact_id);
+      } else if (contact.first_name && contact.last_name && contact.linked_account_id) {
+        await emailIntelligence.findForContact(contact.contact_id, { save: true });
+      }
+    } catch (_) {}
+
+    return (await this.findById(contact.contact_id)) || contact;
   }
 
   /**
@@ -238,7 +249,19 @@ class Contact {
     `;
 
     const result = await pool.query(query, values);
-    return result.rows[0];
+    const updated = result.rows[0];
+
+    if (!updated) return updated;
+
+    try {
+      if (updated.email) {
+        await emailIntelligence.verifyContactEmail(updated.contact_id);
+      } else if (updated.first_name && updated.last_name && updated.linked_account_id) {
+        await emailIntelligence.findForContact(updated.contact_id, { save: true });
+      }
+    } catch (_) {}
+
+    return (await this.findById(updated.contact_id)) || updated;
   }
 
   /**

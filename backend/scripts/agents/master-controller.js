@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
 /**
- * MASTER CONTROLLER v2
+ * MASTER CONTROLLER v3
  *
- * Launches and monitors ALL enrichment agents (11 total):
+ * Launches and monitors ALL enrichment agents (14 total):
  *
  * DISCOVERY AGENTS:
  * - Company Discovery Agent (Yell, Google Places, DDG)
@@ -11,6 +11,7 @@
  * - Google Maps / OSM Scraper Agent (Global)
  *
  * ENRICHMENT AGENTS:
+ * - LinkedIn Enricher Agent ★ (priority pipeline: website→format→email→phone)
  * - Contact Finder Agent (Website scraping)
  * - LinkedIn Scraper Agent (Decision makers)
  * - Email Finder Agent (SMTP verification)
@@ -20,6 +21,7 @@
  * - Address Enricher Agent (Geocoding, Postcodes)
  *
  * QUALITY AGENTS:
+ * - DB Cleaner Agent ★ (fix names, titles, duplicates)
  * - Industry Classifier Agent (NLP classification)
  * - Data Quality Agent (Scoring, dedup, cleanup)
  *
@@ -41,6 +43,7 @@ const AGENTS = [
   { name: 'GOOGLE-MAPS', file: 'agent-google-maps-scraper.js', color: '\x1b[93m' },         // Light Yellow
 
   // --- ENRICHMENT ---
+  { name: 'LINKEDIN-ENRICHER', file: 'agent-linkedin-enricher.js', color: '\x1b[97m' },     // Bright White (PRIORITY)
   { name: 'CONTACT-FINDER', file: 'agent-contact-finder.js', color: '\x1b[33m' },           // Yellow
   { name: 'LINKEDIN-SCRAPER', file: 'agent-linkedin-scraper.js', color: '\x1b[94m' },       // Light Blue
   { name: 'EMAIL-FINDER', file: 'agent-email-finder.js', color: '\x1b[32m' },               // Green
@@ -50,6 +53,7 @@ const AGENTS = [
   { name: 'ADDRESS-ENRICHER', file: 'agent-address-enricher.js', color: '\x1b[37m' },       // White
 
   // --- QUALITY ---
+  { name: 'DB-CLEANER', file: 'agent-db-cleaner.js', color: '\x1b[93m' },                   // Yellow (CLEANUP)
   { name: 'INDUSTRY-CLASSIFIER', file: 'agent-industry-classifier.js', color: '\x1b[91m' }, // Light Red
   { name: 'DATA-QUALITY', file: 'agent-data-quality.js', color: '\x1b[34m' },               // Blue
 ];

@@ -87,6 +87,14 @@ app.get('/', (req, res) => {
         preview: '/api/deduplication/preview/:primaryId/:duplicateId',
         merge: '/api/deduplication/merge',
         autoMerge: '/api/deduplication/auto-merge'
+      },
+      emailIntelligence: {
+        stats: '/api/email-intelligence/stats',
+        verify: '/api/email-intelligence/verify',
+        analyzeCompany: '/api/email-intelligence/company/:accountId/analyze',
+        findForContact: '/api/email-intelligence/contact/:contactId/find',
+        findForPerson: '/api/email-intelligence/find',
+        backfill: '/api/email-intelligence/backfill'
       }
     },
     documentation: '/api/docs'
@@ -129,8 +137,13 @@ app.use('/api/analytics', require('./src/routes/analytics')); // Analytics endpo
 app.use('/api/export', require('./src/routes/export')); // CSV/JSON export
 app.use('/api/enriched', require('./src/routes/enriched')); // Enriched data view
 app.use('/api/llm',     require('./src/routes/llm'));     // Local Llama 3.2 AI endpoint
+app.use('/api/email-intelligence', require('./src/routes/email-intelligence')); // Hunter-style email intelligence
 app.use('/api/scraper', require('./src/routes/scraper')); // Browser extension scraper endpoint
 app.use('/api/agents',  require('./src/routes/agents'));  // Army — agent control panel
+app.use('/api/gemini',  require('./src/routes/gemini-enrichment')); // Gemini AI company enrichment
+app.use('/api/openrouter', require('./src/routes/openrouter-enrichment')); // OpenRouter multi-model enrichment
+app.use('/api/deep-enrich', require('./src/routes/deep-enrich')); // Deep research & correction
+app.use('/api/orchestrator', require('./src/routes/orchestrator')); // Master orchestrator — all agents unified
 
 // Extension download endpoint
 app.get('/api/extension/download', (req, res) => {

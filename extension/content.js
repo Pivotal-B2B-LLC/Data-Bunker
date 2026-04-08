@@ -15,6 +15,7 @@
 
 let isActive  = false;
 let stopFlag  = false;
+let navPending = false;   // true when nextPage() is doing URL fallback navigation
 let pageLeads = [];
 
 const API = 'http://localhost:5000';
@@ -48,6 +49,82 @@ const LABELS = {
   zoominfo:'ZoomInfo', hunter:'Hunter.io', generic:'Directory'
 };
 
+// ── Name sanitizer — strip bullets, connection degree, pipe-delimited junk ────
+// Also detects when a job title is concatenated after the name and splits them.
+const JOB_SPLIT_WORDS = new Set([
+  'professor', 'director', 'manager', 'engineer', 'analyst', 'consultant',
+  'specialist', 'coordinator', 'administrator', 'officer', 'associate',
+  'executive', 'president', 'founder', 'co-founder', 'owner', 'partner',
+  'lead', 'head', 'chief', 'senior', 'junior', 'principal', 'vp',
+  'advisor', 'counsel', 'attorney', 'doctor', 'surgeon', 'ceo', 'cto', 'cfo', 'coo',
+  'teacher', 'instructor', 'lecturer', 'researcher', 'scientist',
+  'developer', 'architect', 'designer', 'producer', 'editor',
+  'supervisor', 'captain', 'colonel', 'general', 'sergeant',
+  'intern', 'fellow', 'student', 'graduate',
+  // Business / operations words
+  'operations', 'strategy', 'marketing', 'sales', 'finance', 'accounting',
+  'business', 'digital', 'clinical', 'research', 'software', 'tech',
+  'technology', 'data', 'product', 'project', 'program', 'management',
+  'development', 'engineering', 'design', 'creative', 'content',
+  'customer', 'success', 'support', 'service', 'human', 'resources',
+  'talent', 'recruitment', 'procurement', 'supply', 'logistics',
+  'manufacturing', 'production', 'quality', 'compliance', 'legal',
+  'planning', 'analytics', 'intelligence', 'innovation', 'growth',
+  'revenue', 'performance', 'brand', 'communications', 'relations',
+  // Board / governance
+  'board', 'trustee', 'member', 'committee', 'advisory', 'chairman',
+  'emeritus', 'retired',
+  // Company / institution words
+  'group', 'solutions', 'services', 'systems', 'technologies', 'consulting',
+  'global', 'international', 'industries', 'enterprises', 'agency',
+  'university', 'college', 'school', 'institute', 'hospital',
+  // LinkedIn junk
+  'linkedin', 'top', 'voice', 'influencer', 'keynote', 'speaker',
+  'author', 'bestselling', 'champion', 'olympic', 'veteran', 'expert',
+  'professional', 'certified', 'entrepreneur', 'freelance',
+  'outsourcing', 'enterprise', 'startup', 'lean', 'agile',
+  'resilience', 'leadership', 'payable', 'accounts', 'helping',
+  'mental', 'health', 'private', 'equity', 'public',
+]);
+
+function cleanName(raw) {
+  if (!raw) return '';
+  let n = raw
+    .replace(/^[\s•·\-–—|]+/, '')          // leading bullets / pipes
+    .replace(/[\s•·\-–—|]+$/, '')          // trailing bullets / pipes
+    .replace(/\b\d+(st|nd|rd|th)\+?\b/gi, '') // 1st, 2nd, 3rd+, etc.
+    .replace(/<[^>]*>/g, '')                // stray HTML tags
+    .replace(/[^a-zA-ZÀ-ÿ\s'.\-]/g, '')   // keep only letters, spaces, hyphens, apostrophes, dots
+    .replace(/\s{2,}/g, ' ')               // collapse whitespace
+    .trim();
+
+  // Split name from job title: if word 3+ is a known job word, truncate
+  const words = n.split(/\s+/);
+  let cutoff = Math.min(words.length, 3); // Max 3 name words (first, middle, last)
+  for (let i = 2; i < words.length; i++) {
+    if (JOB_SPLIT_WORDS.has(words[i].toLowerCase())) { cutoff = Math.min(cutoff, i); break; }
+    // "at" or "@" after 2+ name words = rest is subtitle
+    if (words[i].toLowerCase() === 'at') { cutoff = Math.min(cutoff, i); break; }
+  }
+  n = words.slice(0, cutoff).join(' ');
+
+  if (n.length > 60) n = n.slice(0, 60).replace(/\s\S*$/, '').trim();
+  if ((n.match(/[a-zA-ZÀ-ÿ]/g) || []).length < 2) return '';
+  return n;
+}
+
+// ── Quick scroll to trigger lazy-loading of off-screen results ────────────────
+async function quickScroll() {
+  const h = document.body.scrollHeight;
+  for (let y = 0; y < h; y += 300) {
+    window.scrollTo(0, y);
+    await sleep(80);
+  }
+  await sleep(500);
+  window.scrollTo(0, 0);
+  await sleep(300);
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 // MESSAGE HANDLER
 // ══════════════════════════════════════════════════════════════════════════════
@@ -60,6 +137,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.action === 'SCAN') {
     (async () => {
       try {
+        if (getStrategy() === 'linkedin') await quickScroll();
         const blocks = await gatherBlocks();
         pageLeads = blocks;
         sendResponse({ ok: true, count: blocks.length, strategy: getStrategy() });
@@ -71,17 +149,27 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.action === 'EXTRACT_AND_SAVE') {
     (async () => {
       try {
-        if (!pageLeads.length) pageLeads = await gatherBlocks();
+        const isLi = getStrategy() === 'linkedin';
+        if (isLi) await quickScroll();
+        pageLeads = await gatherBlocks();
         if (!pageLeads.length) { sendResponse({ ok: false, error: 'No leads found', saved: 0 }); return; }
+        const filters = getStrategy() === 'linkedin' ? liFilters() : {};
         const resp = await fetch(API + '/api/scraper/leads', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ blocks: pageLeads, url: location.href, strategy: getStrategy(), source: getStrategy() + '_scrape' }),
+          body: JSON.stringify({ blocks: pageLeads, url: location.href, strategy: getStrategy(), source: getStrategy() + '_scrape', filters }),
           signal: AbortSignal.timeout(60000)
         });
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.error || 'HTTP ' + resp.status);
-        sendResponse({ ok: true, ...data });
+        // Auto-advance: if on LinkedIn, trigger full auto-scrape of remaining pages
+        if (isLi && isLiPage()) {
+          sendResponse({ ok: true, ...data, autoAdvancing: true });
+          await sleep(1500 + Math.random() * 2000);
+          if (!isActive) runAuto().catch(e => reportError(e.message));
+        } else {
+          sendResponse({ ok: true, ...data });
+        }
       } catch (e) { sendResponse({ ok: false, error: e.message, saved: 0 }); }
     })();
     return true;
@@ -136,21 +224,177 @@ async function gatherBlocks() {
 // ── LinkedIn ──────────────────────────────────────────────────────────────────
 function gatherLinkedIn() {
   const blocks = [], seen = new Set();
-  const containers = document.querySelectorAll(
-    'li.reusable-search__result-container, li[class*="result-container"], ' +
-    'li[class*="entity-result"], li[class*="search-result"]'
-  );
-  for (const li of containers) {
-    const b = liCard(li);
-    if (b && !seen.has(b.profileUrl || b.rawText.slice(0, 60))) { seen.add(b.profileUrl || b.rawText.slice(0, 60)); blocks.push(b); }
+
+  console.log('[Data Bunker] gatherLinkedIn() — scanning DOM...');
+
+  // ── Approach 1: Find containers by known CSS classes ──
+  const containerSelectors = [
+    'li.reusable-search__result-container',
+    'li[class*="result-container"]',
+    'li[class*="entity-result"]',
+    'div[data-view-name*="search-entity"]',
+    'li[class*="search-result"]',
+    'li[class*="reusable-search"]',
+    // 2025-2026 LinkedIn class patterns
+    '[class*="entity-result__item"]',
+    '[class*="search-result__wrapper"]',
+    '[class*="search-entity"]',
+    'div[class*="t-roman"][class*="t-sans"]',
+  ];
+
+  const containers = [];
+  for (const sel of containerSelectors) {
+    try {
+      const els = document.querySelectorAll(sel);
+      if (els.length >= 2) {
+        console.log('[Data Bunker] Container selector hit:', sel, '→', els.length, 'elements');
+        els.forEach(li => containers.push(li));
+        break;
+      }
+    } catch {}
   }
-  document.querySelectorAll('a[href*="/in/"]').forEach(a => {
-    const href = liUrl(a.href);
-    if (!href || seen.has(href)) return;
-    const card = walkUp(a);
-    const b = liCard(card);
-    if (b) { seen.add(href); blocks.push(b); }
-  });
+
+  // ── Approach 2: Find the <ul> or <div> that holds all the search results ──
+  // LinkedIn always has a list of results — find it by looking for the parent
+  // that contains the most /in/ profile links.
+  if (containers.length === 0) {
+    console.log('[Data Bunker] No containers via CSS — trying parent-list approach');
+    const allProfileLinks = document.querySelectorAll('a[href*="/in/"]');
+    console.log('[Data Bunker] Total /in/ links on page:', allProfileLinks.length);
+
+    // Find the best parent <ul> or <ol> or <div> that has the most profile link children
+    const parentMap = new Map();
+    for (const a of allProfileLinks) {
+      const url = liUrl(a.href);
+      if (!url) continue;
+      // Walk up to find a reasonable list container
+      let el = a;
+      for (let i = 0; i < 12; i++) {
+        if (!el.parentElement || el.parentElement === document.body) break;
+        el = el.parentElement;
+        if (el.tagName === 'UL' || el.tagName === 'OL' || el.tagName === 'MAIN' ||
+            (el.tagName === 'DIV' && el.children.length >= 5)) {
+          const key = el;
+          if (!parentMap.has(key)) parentMap.set(key, 0);
+          parentMap.set(key, parentMap.get(key) + 1);
+        }
+      }
+    }
+
+    // Pick the container with the most profile links
+    let bestParent = null, bestCount = 0;
+    for (const [el, count] of parentMap) {
+      if (count > bestCount) { bestCount = count; bestParent = el; }
+    }
+
+    if (bestParent && bestCount >= 3) {
+      console.log('[Data Bunker] Best parent:', bestParent.tagName, 'class:', (bestParent.className || '').slice(0, 60), 'with', bestCount, 'profiles');
+      // Use direct children of this container as card boundaries
+      for (const child of bestParent.children) {
+        const links = child.querySelectorAll('a[href*="/in/"]');
+        if (links.length > 0) containers.push(child);
+      }
+      console.log('[Data Bunker] Found', containers.length, 'child containers');
+    }
+  }
+
+  // ── Process containers ──
+  for (const li of containers) {
+    const profileLinks = li.querySelectorAll('a[href*="/in/"]');
+    if (profileLinks.length === 0) continue;
+
+    // Check unique profiles — if >1, skip (multi-person container)
+    const uniqueProfiles = new Set();
+    for (const a of profileLinks) {
+      const url = liUrl(a.href);
+      if (url) uniqueProfiles.add(url);
+    }
+    if (uniqueProfiles.size > 2) continue; // allow up to 2 (same person may have 2 links)
+
+    const b = liCard(li);
+    const key = b?.profileUrl || b?.rawText?.slice(0, 80);
+    if (b && key && !seen.has(key)) { seen.add(key); blocks.push(b); }
+  }
+
+  console.log('[Data Bunker] After container approach:', blocks.length, 'blocks');
+
+  // ── Approach 3: Nuclear fallback — process each /in/ link individually ──
+  if (blocks.length === 0) {
+    console.log('[Data Bunker] Containers yielded 0 — trying per-link fallback');
+    const allLinks = document.querySelectorAll('a[href*="/in/"]');
+    console.log('[Data Bunker] Processing', allLinks.length, 'individual /in/ links');
+
+    for (const a of allLinks) {
+      const href = liUrl(a.href);
+      if (!href || seen.has(href)) continue;
+
+      // Get the name from the anchor itself
+      let name = '';
+      // aria-label pattern: "View John Smith's profile"
+      const lbl = a.getAttribute('aria-label') || '';
+      const m = lbl.match(/View\s+(.+?)[\u2019\u2018\u0027\u2032']s(?:\s+full)?\s+profile/i);
+      if (m) name = m[1].trim();
+      // span[aria-hidden="true"] inside the link
+      if (!name) {
+        const sp = a.querySelector('span[aria-hidden="true"]') || a.querySelector('span');
+        if (sp) name = sp.textContent.trim();
+      }
+      // Direct text
+      if (!name) name = a.textContent.trim();
+
+      name = cleanName(name);
+      if (!name || name.length < 2) continue;
+      if (/linkedin member/i.test(name)) continue;
+
+      // Walk up to a reasonable parent for subtitle/location text
+      let card = a;
+      for (let i = 0; i < 6; i++) {
+        if (!card.parentElement || card.parentElement === document.body) break;
+        card = card.parentElement;
+        const text = (card.innerText || '').trim();
+        // Stop when we have enough text (subtitle + location)
+        if (text.length > 50 && text.split('\n').length >= 3) break;
+        // Stop at list items
+        if (card.tagName === 'LI') break;
+      }
+
+      // Extract subtitle and location from the card text
+      const lines = (card.innerText || '').split('\n').map(l => l.trim()).filter(l => l.length > 2);
+      let subtitle = '', loc = '';
+      // Find the line after the name
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].includes(name) || name.includes(lines[i])) {
+          if (i + 1 < lines.length) {
+            const candidate = lines[i + 1];
+            if (!/connect|follow|message|^\d+\s*(connection|follower|mutual)/i.test(candidate)) {
+              subtitle = candidate;
+            }
+          }
+          if (i + 2 < lines.length && !subtitle) {
+            subtitle = lines[i + 2];
+          }
+          // Location is typically 1-2 lines after subtitle
+          const subIdx = subtitle ? lines.indexOf(subtitle) : i + 1;
+          if (subIdx + 1 < lines.length) {
+            const locCandidate = lines[subIdx + 1];
+            if (locCandidate && !/connect|follow|message|^\d+\s*(connection|follower|mutual)/i.test(locCandidate) && locCandidate.length < 100) {
+              loc = locCandidate;
+            }
+          }
+          break;
+        }
+      }
+
+      const rawText = (card.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 800);
+
+      seen.add(href);
+      blocks.push({ name, subtitle, location: loc, profileUrl: href, rawText, type: 'linkedin_card' });
+    }
+
+    console.log('[Data Bunker] Per-link fallback:', blocks.length, 'blocks');
+  }
+
+  console.log('[Data Bunker] gatherLinkedIn() TOTAL:', blocks.length, 'blocks');
   return blocks;
 }
 
@@ -166,24 +410,141 @@ function liCard(el) {
     const m = lbl.match(/View\s+(.+?)[\u2019\u2018\u0027\u2032']s(?:\s+full)?\s+profile/i);
     if (m) { name = m[1].trim(); break; }
     if (lbl && !/^view/i.test(lbl) && lbl.length < 80) { name = lbl.trim(); break; }
-    const sp = a.querySelector('span[aria-hidden="true"]');
+    // Nested spans (LinkedIn often uses span > span[aria-hidden])
+    const sp = a.querySelector('span[aria-hidden="true"]') || a.querySelector('span span');
     if (sp) { const t = sp.textContent.trim(); if (t.length > 1 && t.length < 80 && !/linkedin member/i.test(t)) { name = t; break; } }
+    // Direct text content of the anchor
+    const directText = a.textContent.trim();
+    if (directText && directText.length > 2 && directText.length < 80 && !/linkedin member|view.*profile/i.test(directText)) { name = directText; break; }
   }
+  // Title-text selectors (LinkedIn 2024-2026 layouts)
   if (!name || /linkedin member/i.test(name)) {
-    // Image alt fallback
-    for (const img of el.querySelectorAll('img[alt]')) {
-      const alt = img.alt.trim();
-      if (alt.length > 2 && alt.length < 60 && !/photo|profile|avatar|linkedin/i.test(alt)) { name = alt; break; }
+    for (const sel of ['[class*="title-text"] a span[aria-hidden="true"]', '[class*="title-text"] span[aria-hidden="true"]', '.entity-result__title-text span', '[class*="actor-name"]', '[data-anonymize="person-name"]']) {
+      const el2 = el.querySelector(sel);
+      if (el2) { const t = el2.textContent.trim(); if (t.length > 2 && t.length < 80 && !/linkedin member/i.test(t)) { name = t; break; } }
     }
   }
+  if (!name || /linkedin member/i.test(name)) {
+    for (const img of el.querySelectorAll('img[alt]')) {
+      const alt = img.alt.trim();
+      if (alt.length > 2 && alt.length < 60 && !/photo|profile|avatar|linkedin|logo/i.test(alt)) { name = alt; break; }
+    }
+  }
+  // Last resort: first line that looks like a person name (2-4 capitalized words)
+  if (!name) {
+    const lines = (el.innerText || '').split('\n').map(l => l.trim()).filter(Boolean);
+    for (const line of lines.slice(0, 5)) {
+      if (/^[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3}$/.test(line) && line.length < 60) { name = line; break; }
+    }
+  }
+  // Clean the name — strip bullets, connection degree, special chars
+  name = cleanName(name);
   if (!name) return null;
 
-  const subEl = el.querySelector('.entity-result__primary-subtitle, [class*="primary-subtitle"], .artdeco-entity-lockup__subtitle, [class*="lockup__subtitle"]');
-  const subtitle = subEl ? (subEl.querySelector('span[aria-hidden="true"]') || subEl).textContent.trim() : '';
-  const locEl = el.querySelector('.entity-result__secondary-subtitle, [class*="secondary-subtitle"], .artdeco-entity-lockup__caption, [class*="lockup__caption"]');
-  let loc = locEl ? (locEl.querySelector('span[aria-hidden="true"]') || locEl).textContent.trim() : '';
-  if (/^\d+\s*(connection|follower)/i.test(loc)) loc = '';
+  // Subtitle (job title): try multiple selectors — LinkedIn changes DOM frequently
+  const subSelectors = [
+    '.entity-result__primary-subtitle',
+    '[class*="primary-subtitle"]',
+    '.artdeco-entity-lockup__subtitle',
+    '[class*="lockup__subtitle"]',
+    '[class*="entity-result__summary"]',
+    '.reusable-search-simple-insight__text-container',
+    '[class*="t-black--light"][class*="t-14"]',
+    '.entity-result__content-summary',
+    '[class*="entity-result"] [class*="subtitle"]',
+    '[class*="entity-result__content"] > div:nth-child(2)',
+  ];
+  let subtitle = '';
+  for (const sel of subSelectors) {
+    try {
+      const subEl = el.querySelector(sel);
+      if (subEl) {
+        subtitle = (subEl.querySelector('span[aria-hidden="true"]') || subEl).textContent.trim();
+        if (subtitle && subtitle.length > 2 && subtitle !== name) break;
+        subtitle = '';
+      }
+    } catch {}
+  }
+
+  // Positional fallback: element right after the name link is usually the job title
+  if (!subtitle) {
+    const nameLink = el.querySelector('a[href*="/in/"]');
+    if (nameLink) {
+      let titleContainer = nameLink.closest('[class*="title-line"], [class*="title-text"]') || nameLink.parentElement;
+      if (titleContainer) {
+        let sibling = titleContainer.nextElementSibling;
+        for (let i = 0; i < 3 && sibling; i++) {
+          const t = (sibling.querySelector('span[aria-hidden="true"]') || sibling).textContent.trim();
+          if (t && t.length > 2 && t.length < 200 && t !== name && !/connect|follow|message|^\d+\s*(connection|follower)/i.test(t)) {
+            subtitle = t;
+            break;
+          }
+          sibling = sibling.nextElementSibling;
+        }
+      }
+    }
+  }
+
+  // Fallback: extract subtitle from rawText
   const rawText = (el.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 800);
+  if (!subtitle && rawText) {
+    // Try newline splitting first — the line right after the name is the job title
+    const nlLines = (el.innerText || '').split('\n').map(l => l.trim()).filter(l => l.length > 2);
+    let nameIdx = -1;
+    for (let i = 0; i < Math.min(nlLines.length, 5); i++) {
+      if (name && nlLines[i].includes(name)) { nameIdx = i; break; }
+    }
+    if (nameIdx >= 0 && nameIdx + 1 < nlLines.length) {
+      const candidate = nlLines[nameIdx + 1];
+      if (!/connect|follow|message|^\d+\s*(connection|follower|mutual)/i.test(candidate)) {
+        subtitle = candidate;
+      }
+    }
+    // Fallback: middle-dot splitting
+    if (!subtitle) {
+      const lines = rawText.split(/[·]/).map(l => l.trim()).filter(Boolean);
+      for (let i = 1; i < Math.min(lines.length, 5); i++) {
+        const line = lines[i];
+        if (!line || line.length < 3) continue;
+        if (/connect|follow|message|degree|mutual/i.test(line)) continue;
+        if (/^\d+\s*(connection|follower|mutual)/i.test(line)) continue;
+        subtitle = line;
+        break;
+      }
+    }
+  }
+
+  const locSelectors = [
+    '.entity-result__secondary-subtitle',
+    '[class*="secondary-subtitle"]',
+    '.artdeco-entity-lockup__caption',
+    '[class*="lockup__caption"]',
+    '[class*="entity-result__content"] > div:nth-child(3)',
+  ];
+  let loc = '';
+  for (const sel of locSelectors) {
+    try {
+      const locEl = el.querySelector(sel);
+      if (locEl) {
+        loc = (locEl.querySelector('span[aria-hidden="true"]') || locEl).textContent.trim();
+        if (loc && loc.length > 2 && !/^\d+\s*(connection|follower)/i.test(loc)) break;
+        loc = '';
+      }
+    } catch {}
+  }
+  // Positional fallback: location is usually the line after the subtitle
+  if (!loc && subtitle) {
+    const nlLines = (el.innerText || '').split('\n').map(l => l.trim()).filter(l => l.length > 2);
+    for (let i = 0; i < nlLines.length; i++) {
+      if (nlLines[i].includes(subtitle) && i + 1 < nlLines.length) {
+        const candidate = nlLines[i + 1];
+        if (candidate && !/connect|follow|message|^\d+\s*(connection|follower|mutual)/i.test(candidate) && candidate.length < 100) {
+          loc = candidate;
+          break;
+        }
+      }
+    }
+  }
 
   return { name, subtitle, location: loc, profileUrl, rawText, type: 'linkedin_card' };
 }
@@ -199,13 +560,19 @@ function liUrl(href) {
 
 function walkUp(a) {
   let el = a;
-  for (let i = 0; i < 15; i++) {
+  const myUrl = liUrl(a.href);
+  for (let i = 0; i < 8; i++) {
     if (!el.parentElement || el.parentElement === document.body) break;
     el = el.parentElement;
+    // Stop if this element contains other people's profile links
+    const otherPeople = [...el.querySelectorAll('a[href*="/in/"]')]
+      .filter(x => liUrl(x.href) && liUrl(x.href) !== myUrl);
+    if (otherPeople.length > 0) return el.previousElementSibling || el;
+    // Good stopping points
     if (el.tagName === 'LI' && el.textContent.trim().length > 15) return el;
     if (el.querySelector?.('[class*="primary-subtitle"]')) return el;
   }
-  return a.parentElement || a;
+  return a.closest('li') || a.parentElement || a;
 }
 
 // ── Google Maps ───────────────────────────────────────────────────────────────
@@ -332,48 +699,148 @@ function isVis(el) {
 // ══════════════════════════════════════════════════════════════════════════════
 async function runAuto() {
   isActive = true; stopFlag = false;
-  let pages = 0, saved = 0;
+  console.log('[Data Bunker] runAuto() started — URL:', location.href, 'Page:', liCurrentPage());
+
+  // Restore counters from storage (survived page navigation via NAV_TO_URL)
+  const stored = await chrome.storage.local.get('scraperStats').catch(() => ({}));
+  const prev = stored?.scraperStats || {};
+  let pages = (prev.status === 'running') ? (prev.pagesProcessed || 0) : 0;
+  let saved = (prev.status === 'running') ? (prev.totalSaved || 0) : 0;
+  const seenUrls = new Set(); // dedup: track profile URLs already scraped
+
   chrome.runtime.sendMessage({ type: 'SCRAPING_STARTED' }).catch(() => {});
 
+  let consecutiveEmpty = 0; // stop if N pages in a row yield 0 new leads
+  const MAX_EMPTY = 3;
+  const MAX_PAGES = 200; // safety cap
+
   try {
-    while (!stopFlag) {
+    while (!stopFlag && pages < MAX_PAGES) {
       if (!isLiPage()) break;
-      await waitFor(() => document.querySelectorAll('a[href*="/in/"]').length > 2, 15000);
+      const pn = liCurrentPage();
+      console.log('[Data Bunker] ═══ Processing page', pn, '═══');
+
+      // ── Step 1: Wait for SEARCH RESULT cards to load ──
+      // Wait for profile links to appear on the page.
+      // Use a simple count — need at least 2 /in/ links for results to be loaded.
+      const hasResults = await waitFor(() => {
+        const count = document.querySelectorAll('a[href*="/in/"]').length;
+        return count >= 2;
+      }, 25000);
+
+      if (!hasResults) {
+        console.log('[Data Bunker] No search results loaded on page', pn, '— end of results');
+        break;
+      }
       if (stopFlag) break;
+
+      // ── Step 2: Scroll and wait for DOM to stabilize ──
       await humanScroll();
       if (stopFlag) break;
-      await waitStable();
+      await waitStable(2000, 12000);
       if (stopFlag) break;
 
-      const blocks = gatherLinkedIn();
+      // ── Step 3: Gather leads — RETRY up to 3 times if we get 0 ──
+      let blocks = [];
+      let newBlocks = [];
+      const MAX_GATHER_RETRIES = 3;
+
+      for (let attempt = 1; attempt <= MAX_GATHER_RETRIES; attempt++) {
+        blocks = gatherLinkedIn();
+        newBlocks = blocks.filter(b => {
+          const url = b.profileUrl || b.linkedinUrl || '';
+          if (!url || seenUrls.has(url)) return false;
+          return true;
+        });
+        console.log('[Data Bunker] Gather attempt', attempt + '/' + MAX_GATHER_RETRIES,
+          '— found', blocks.length, 'blocks,', newBlocks.length, 'new');
+
+        if (newBlocks.length > 0) break;
+
+        // If 0 results, maybe page hasn't fully rendered yet — wait and retry
+        if (attempt < MAX_GATHER_RETRIES) {
+          console.log('[Data Bunker] 0 results — waiting 5s and retrying...');
+          await sleep(5000);
+          await humanScroll(); // scroll again to trigger lazy loading
+          await waitStable(2000, 8000);
+        }
+        if (stopFlag) break;
+      }
+
+      // Mark all gathered URLs as seen (after retry loop succeeds)
+      for (const b of newBlocks) {
+        const url = b.profileUrl || b.linkedinUrl || '';
+        if (url) seenUrls.add(url);
+      }
+
       pageLeads = blocks;
-      const total = liTotalResults(), pn = liCurrentPage();
+      const total = liTotalResults();
+      progress({ pagesProcessed: pages, totalSaved: saved, pageNum: pn, totalResults: total, detectedThisPage: blocks.length, newThisPage: newBlocks.length });
 
-      progress({ pagesProcessed: pages, totalSaved: saved, pageNum: pn, totalResults: total, detectedThisPage: blocks.length });
-
-      if (blocks.length > 0) {
+      // ── Step 4: Save leads to backend — ONLY navigate after confirmed save ──
+      let pageSaved = 0;
+      if (newBlocks.length > 0) {
+        consecutiveEmpty = 0;
         try {
           const r = await fetch(API + '/api/scraper/leads', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ blocks, url: location.href, strategy: 'linkedin', source: 'linkedin_auto' }),
+            body: JSON.stringify({ blocks: newBlocks, url: location.href, strategy: 'linkedin', source: 'linkedin_auto', filters: liFilters() }),
             signal: AbortSignal.timeout(60000)
           });
           const d = await r.json();
-          saved += d.saved || 0;
+          pageSaved = (d.saved || 0) + (d.updated || 0);
+          saved += pageSaved;
+          console.log('[Data Bunker] ✅ Page', pn, '— saved', pageSaved, 'leads (total:', saved, ')');
         } catch (e) {
+          console.error('[Data Bunker] ❌ Save failed on page', pn, ':', e.message);
           progress({ pagesProcessed: pages, totalSaved: saved, pageNum: pn, totalResults: total, error: e.message });
+          // Don't navigate if save failed — retry this page
+          console.log('[Data Bunker] Retrying save in 5s...');
+          await sleep(5000);
+          if (stopFlag) break;
+          try {
+            const r2 = await fetch(API + '/api/scraper/leads', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ blocks: newBlocks, url: location.href, strategy: 'linkedin', source: 'linkedin_auto', filters: liFilters() }),
+              signal: AbortSignal.timeout(60000)
+            });
+            const d2 = await r2.json();
+            pageSaved = (d2.saved || 0) + (d2.updated || 0);
+            saved += pageSaved;
+            console.log('[Data Bunker] ✅ Retry succeeded — saved', pageSaved, 'leads');
+          } catch (e2) {
+            console.error('[Data Bunker] ❌ Retry also failed:', e2.message);
+          }
+        }
+      } else {
+        consecutiveEmpty++;
+        console.log('[Data Bunker] ⚠️ Page', pn, '— 0 new leads (consecutive empty:', consecutiveEmpty + '/' + MAX_EMPTY + ')');
+        if (consecutiveEmpty >= MAX_EMPTY) {
+          console.log('[Data Bunker] Stopping: ' + MAX_EMPTY + ' consecutive pages with 0 new leads');
+          break;
         }
       }
 
       pages++;
-      progress({ pagesProcessed: pages, totalSaved: saved, pageNum: pn, totalResults: total });
+      progress({ pagesProcessed: pages, totalSaved: saved, pageNum: pn, totalResults: total, pageSaved });
 
-      await sleep(2000 + Math.random() * 3000);
+      // ── Step 5: Wait, then navigate to next page ──
+      // Human-like delay before pagination
+      const delay = 3000 + Math.random() * 4000;
+      console.log('[Data Bunker] Waiting', Math.round(delay / 1000) + 's before next page...');
+      await sleep(delay);
       if (stopFlag) break;
+
+      console.log('[Data Bunker] Calling nextPage() — page', pn, 'done (' + pageSaved + ' saved)');
       if (!(await nextPage())) break;
     }
   } finally { isActive = false; }
-  chrome.runtime.sendMessage({ type: 'SCRAPING_DONE', data: { pagesProcessed: pages, totalSaved: saved } }).catch(() => {});
+  // Only send SCRAPING_DONE if we truly finished (not navigating to next page)
+  if (!navPending) {
+    console.log('[Data Bunker] 🏁 Scraping complete — pages:', pages, 'total saved:', saved);
+    chrome.runtime.sendMessage({ type: 'SCRAPING_DONE', data: { pagesProcessed: pages, totalSaved: saved } }).catch(() => {});
+  }
+  navPending = false;
 }
 
 function progress(data) { chrome.runtime.sendMessage({ type: 'PROGRESS_UPDATE', data }).catch(() => {}); }
@@ -411,51 +878,154 @@ function liTotalResults() {
   return 0;
 }
 
-function liCurrentPage() { return Math.floor(parseInt(new URLSearchParams(location.search).get('start') || '0') / 10) + 1; }
+function liCurrentPage() {
+  const p = new URLSearchParams(location.search);
+  // LinkedIn uses ?page=N (1-indexed)
+  if (p.get('page')) return parseInt(p.get('page')) || 1;
+  // Fallback: older URLs use ?start=N (0-indexed, 10 per page)
+  if (p.get('start')) return Math.floor(parseInt(p.get('start')) / 10) + 1;
+  return 1;
+}
 
 function liFilters() {
   const f = {}, p = new URLSearchParams(location.search);
-  if (p.get('keywords')) f.keywords = p.get('keywords');
-  if (p.get('network'))  f.connectionDegree = p.get('network');
-  const pills = [...document.querySelectorAll('.search-reusables__filter-pill-button.toggled span, [aria-checked="true"] span')].map(e => e.textContent.trim()).filter(Boolean);
-  if (pills.length) f.activeFilters = pills;
+  // Standard LinkedIn search URL parameters
+  if (p.get('keywords'))        f.keywords = p.get('keywords');
+  if (p.get('network'))         f.connectionDegree = p.get('network');
+  if (p.get('geoUrn'))          f.geoUrn = p.get('geoUrn');
+  if (p.get('industry')) {
+    // LinkedIn industries come as URL-encoded JSON arrays like ["25"] — resolve to text
+    let raw = p.get('industry');
+    // Strip JSON array brackets and quotes
+    raw = raw.replace(/^[\["\]]+|[\["\]]+$/g, '').trim();
+    // If it's a numeric code, try to read the industry name from the page filter pills
+    if (/^\d+$/.test(raw)) {
+      // Look for active industry pill text on the page
+      const pillText = extractFilterPillText('industry');
+      f.industry = pillText || null; // don't save numeric codes
+    } else if (raw.length > 1 && !/^\d+$/.test(raw)) {
+      f.industry = raw;
+    }
+  }
+  if (p.get('currentCompany'))  f.currentCompany = p.get('currentCompany');
+  if (p.get('pastCompany'))     f.pastCompany = p.get('pastCompany');
+  if (p.get('school'))          f.school = p.get('school');
+  if (p.get('profileLanguage')) f.profileLanguage = p.get('profileLanguage');
+  if (p.get('serviceCategory')) f.serviceCategory = p.get('serviceCategory');
+  if (p.get('title'))           f.title = p.get('title');
+  // Collect all active filter pills from the page UI
+  const pillSelectors = [
+    '.search-reusables__filter-pill-button.toggled span',
+    '[aria-checked="true"] span',
+    '.search-reusables__filter-value-text',
+    '[class*="filter-pill"][class*="active"] span',
+    '.artdeco-pill--selected span',
+    '.search-reusables__filter-list button[aria-pressed="true"] span',
+  ];
+  const pills = new Set();
+  for (const sel of pillSelectors) {
+    try { document.querySelectorAll(sel).forEach(e => { const t = e.textContent.trim(); if (t && t.length > 1 && t.length < 100) pills.add(t); }); } catch {}
+  }
+  if (pills.size) f.activeFilters = [...pills];
+  // Try to extract location text from results header
+  for (const sel of ['.search-results__cluster-title', '[class*="search-results-container"] h1', '[class*="search-results-container"] h2']) {
+    try {
+      const el = document.querySelector(sel);
+      if (el) {
+        const text = el.textContent.trim();
+        const locMatch = text.match(/(?:in|from|near)\s+(.+?)(?:\s*$|\s*\|)/i);
+        if (locMatch) { f.locationText = locMatch[1].trim(); break; }
+      }
+    } catch {}
+  }
   return f;
 }
 
-// ── Pagination ────────────────────────────────────────────────────────────────
-async function nextPage() {
-  const btns = [
-    document.querySelector('button[aria-label="Next"]'),
-    document.querySelector('.artdeco-pagination__button--next'),
-    ...[...document.querySelectorAll('.artdeco-pagination button, [class*="pagination"] button')].filter(b => /^next$/i.test(b.textContent.trim()))
-  ].filter(Boolean);
-
-  for (const btn of btns) {
-    if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') continue;
-    const prev = new URLSearchParams(location.search).get('start') || '0';
-    btn.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    await sleep(400 + Math.random() * 300);
-    btn.click();
-    const ok = await waitFor(() => (new URLSearchParams(location.search).get('start') || '0') !== prev, 15000);
-    if (!ok) await sleep(2000);
-    window.scrollTo({ top: 0 });
-    await waitFor(() => document.querySelectorAll('a[href*="/in/"]').length > 2, 20000);
-    await sleep(500 + Math.random() * 500);
-    return true;
+// Helper: try to extract a human-readable filter label from LinkedIn's UI pills
+function extractFilterPillText(filterType) {
+  // LinkedIn shows active filters as pill buttons with text labels
+  const selectors = [
+    '.search-reusables__filter-pill-button span',
+    '[aria-checked="true"] span',
+    '.search-reusables__filter-value-text',
+    '.artdeco-pill--selected span',
+    '.search-reusables__filter-list button[aria-pressed="true"] span',
+    // The filter sidebar shows labels
+    '[class*="search-reusables__filter"] [class*="t-bold"]',
+    '[class*="filter-pill"] span',
+  ];
+  for (const sel of selectors) {
+    try {
+      for (const el of document.querySelectorAll(sel)) {
+        const t = el.textContent.trim();
+        // Industry pills are typically >3 chars, not numeric, not generic labels
+        if (t && t.length > 3 && t.length < 80 && !/^\d+$/.test(t) &&
+            !/^(all|any|filter|clear|show|results|people|apply)/i.test(t)) {
+          return t;
+        }
+      }
+    } catch {}
   }
+  return null;
+}
 
-  // URL fallback
-  if (location.href.includes('linkedin.com/search/results/')) {
-    const url = new URL(location.href);
-    const start = parseInt(url.searchParams.get('start') || '0');
-    const total = liTotalResults();
-    if (total > 0 && start + 10 >= total) return false;
-    url.searchParams.set('start', String(start + 10));
-    stopFlag = true;
-    chrome.runtime.sendMessage({ type: 'NAV_TO_URL', url: url.toString() }).catch(() => {});
-    await sleep(400);
+// ── Pagination ────────────────────────────────────────────────────────────────
+
+async function nextPage() {
+  const currentPage = liCurrentPage();
+  const nextPageNum = currentPage + 1;
+  console.log('[Data Bunker] nextPage() — currently on page', currentPage, '→ going to page', nextPageNum);
+  console.log('[Data Bunker] Current URL:', location.href);
+
+  // Only paginate on LinkedIn search pages
+  const isPaginatable = location.href.includes('linkedin.com/search/results/') ||
+                        location.href.includes('linkedin.com/sales/search');
+  if (!isPaginatable) {
+    console.log('[Data Bunker] Not a paginatable LinkedIn search page — stopping');
     return false;
   }
+
+  // Build next page URL by changing/adding ?page=N
+  const url = new URL(location.href);
+  url.searchParams.set('page', String(nextPageNum));
+  // Remove old 'start' param if present (LinkedIn doesn't need both)
+  url.searchParams.delete('start');
+  const nextUrl = url.toString();
+
+  console.log('[Data Bunker] Next URL:', nextUrl);
+
+  // Prepare for page reload — stop the current runAuto() loop cleanly
+  navPending = true;
+  stopFlag = true;
+
+  // Save progress so runAuto() resumes after the page reloads
+  // Merge with existing stats to preserve totalSaved counter
+  const currentStats = await chrome.storage.local.get('scraperStats').catch(() => ({}));
+  const existingSaved = currentStats?.scraperStats?.totalSaved || 0;
+  await chrome.storage.local.set({
+    scraperStats: {
+      status: 'running',
+      pagesProcessed: currentPage,
+      totalSaved: existingSaved,
+      lastUpdate: Date.now()
+    },
+    pendingAutoStart: true
+  }).catch(() => {});
+
+  // Layer 1: Ask background.js to navigate (sets pendingTabId for tab watcher)
+  try {
+    chrome.runtime.sendMessage({ type: 'NAV_TO_URL', url: nextUrl }).catch(() => {});
+  } catch (e) {
+    console.warn('[Data Bunker] NAV_TO_URL message failed:', e.message);
+  }
+
+  // Layer 2: If background.js doesn't navigate within 3s, force it directly
+  await sleep(3000);
+  if (liCurrentPage() === currentPage) {
+    console.log('[Data Bunker] Background nav timeout — forcing window.location.href');
+    window.location.href = nextUrl;
+  }
+
   return false;
 }
 
