@@ -8,7 +8,15 @@
  *   4. Stats storage — persist scraping progress in chrome.storage
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-const API_BASE = 'http://localhost:5000';
+// API_BASE is loaded from chrome.storage.sync so any user can point it at their server.
+// Default: localhost for local dev. Change it in the extension popup → Settings.
+let API_BASE = 'http://localhost:5000';
+chrome.storage.sync.get('serverUrl', ({ serverUrl }) => {
+  if (serverUrl) API_BASE = serverUrl;
+});
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'sync' && changes.serverUrl) API_BASE = changes.serverUrl.newValue;
+});
 
 // ── Keepalive ─────────────────────────────────────────────────────────────────
 let keepaliveId = null;

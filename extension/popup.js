@@ -9,6 +9,7 @@ const $ = id => document.getElementById(id);
 const serverPill   = $('serverPill'), serverLabel = $('serverLabel');
 const siteBar      = $('siteBar'), siteIcon = $('siteIcon'), siteHost = $('siteHost'), siteBadge = $('siteBadge');
 const idlePanel    = $('idlePanel'), universalPanel = $('universalPanel'), linkedinPanel = $('linkedinPanel');
+const settingsPanel = $('settingsPanel');
 const btnScan      = $('btnScan'), scanResult = $('scanResult');
 const extractSection = $('extractSection'), btnExtract = $('btnExtract'), saveResult = $('saveResult');
 const filtersRow   = $('filtersRow');
@@ -22,7 +23,58 @@ const btnLiScan    = $('btnLiScan'), liSaveResult = $('liSaveResult');
 const ICONS = { linkedin:'💼', apollo:'🚀', maps:'🗺️', yelp:'⭐', yellowpages:'📒', crunchbase:'📈', zoominfo:'🔬', hunter:'🎯', generic:'🌐' };
 let currentPanel = 'idle';
 
+// ── API URL (loaded from storage, falls back to localhost) ────────────────────
+let API_BASE = 'http://localhost:5000';
+let DASH_BASE = 'http://localhost:3000';
+
+function applyServerUrl(url) {
+  API_BASE = url || 'http://localhost:5000';
+  // Derive dashboard URL: same host, no port (or port 3000 for localhost)
+  try {
+    const u = new URL(API_BASE);
+    DASH_BASE = u.hostname === 'localhost' ? 'http://localhost:3000' : `${u.protocol}//${u.hostname}`;
+  } catch { DASH_BASE = 'http://localhost:3000'; }
+  // Update dashboard links
+  const link = `${DASH_BASE}/contacts`;
+  if ($('dashLinkUniversal')) $('dashLinkUniversal').href = link;
+  if ($('dashLinkLinkedIn')) $('dashLinkLinkedIn').href = link;
+}
+
+chrome.storage.sync.get(['serverUrl'], ({ serverUrl }) => {
+  applyServerUrl(serverUrl || 'http://localhost:5000');
+  if ($('serverUrlInput')) $('serverUrlInput').value = API_BASE;
+});
+
+// ── Settings panel ────────────────────────────────────────────────────────────
+$('btnSettings').addEventListener('click', () => {
+  const open = !settingsPanel.classList.contains('hidden');
+  if (open) {
+    settingsPanel.classList.add('hidden');
+  } else {
+    $('serverUrlInput').value = API_BASE;
+    $('settingsSaved').classList.add('hidden');
+    settingsPanel.classList.remove('hidden');
+  }
+});
+
+$('btnCancelSettings').addEventListener('click', () => {
+  settingsPanel.classList.add('hidden');
+});
+
+$('btnSaveServer').addEventListener('click', async () => {
+  const url = $('serverUrlInput').value.trim().replace(/\/$/, '');
+  if (!url) return;
+  await chrome.storage.sync.set({ serverUrl: url });
+  applyServerUrl(url);
+  const saved = $('settingsSaved');
+  saved.className = 'save-result ok';
+  saved.textContent = '✓ Saved — reload any open tabs to apply';
+  saved.classList.remove('hidden');
+  setTimeout(() => settingsPanel.classList.add('hidden'), 2000);
+});
+
 function fmt(n) { return Number(n || 0).toLocaleString(); }
+
 function showPanel(name) {
   currentPanel = name;
   [idlePanel, universalPanel, linkedinPanel].forEach(p => p.classList.add('hidden'));
@@ -189,7 +241,7 @@ function renderFilters(f) {
 // ── Server health ─────────────────────────────────────────────────────────────
 async function checkServer() {
   try {
-    const r = await fetch('http://localhost:5000/health', { signal: AbortSignal.timeout(3000) });
+    const r = await fetch(`${API_BASE}/health`, { signal: AbortSignal.timeout(3000) });
     serverPill.className = 'server-pill ' + (r.ok ? 'online' : 'offline');
     serverLabel.textContent = r.ok ? 'connected' : 'no server';
   } catch {

@@ -19,7 +19,21 @@
         <span class="server-dot"></span>
         <span id="serverLabel">offline</span>
       </div>
+      <button id="btnSettings" title="Settings" style="background:none;border:none;cursor:pointer;font-size:16px;padding:2px 4px;opacity:0.6">⚙</button>
     </header>
+
+    <!-- Settings panel -->
+    <div id="settingsPanel" class="panel hidden" style="padding:12px 14px">
+      <div class="section-label" style="margin-bottom:8px">SERVER SETTINGS</div>
+      <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px">Backend API URL</label>
+      <input id="serverUrlInput" type="url" placeholder="http://localhost:5000"
+        style="width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid var(--border,#333);border-radius:6px;background:var(--bg2,#1a1a1a);color:var(--fg,#fff);font-size:12px;outline:none">
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button id="btnSaveServer" class="btn btn-primary" style="flex:1;font-size:11px">Save</button>
+        <button id="btnCancelSettings" class="btn" style="flex:1;font-size:11px;background:var(--bg2,#222)">Cancel</button>
+      </div>
+      <div id="settingsSaved" class="save-result hidden" style="margin-top:6px"></div>
+    </div>
 
     <!-- Site detection bar -->
     <div id="siteBar" class="site-bar hidden">
@@ -51,7 +65,7 @@
         <div id="saveResult" class="save-result hidden"></div>
       </div>
 
-      <a href="http://localhost:3000/contacts" target="_blank" class="dash-link">View in Dashboard ↗</a>
+      <a id="dashLinkUniversal" href="http://localhost:3000/contacts" target="_blank" class="dash-link">View in Dashboard ↗</a>
     </div>
 
     <!-- ═══ LINKEDIN PANEL ═══ -->
@@ -100,7 +114,7 @@
         <div id="liSaveResult" class="save-result hidden"></div>
       </div>
 
-      <a href="http://localhost:3000/contacts" target="_blank" class="dash-link">View in Dashboard ↗</a>
+      <a id="dashLinkLinkedIn" href="http://localhost:3000/contacts" target="_blank" class="dash-link">View in Dashboard ↗</a>
     </div>
 
   </div>

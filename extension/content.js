@@ -18,7 +18,14 @@ let stopFlag  = false;
 let navPending = false;   // true when nextPage() is doing URL fallback navigation
 let pageLeads = [];
 
-const API = 'http://localhost:5000';
+// API URL loaded from chrome.storage.sync — configurable in popup Settings.
+let API = 'http://localhost:5000';
+chrome.storage.sync.get('serverUrl', ({ serverUrl }) => {
+  if (serverUrl) API = serverUrl;
+});
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'sync' && changes.serverUrl) API = changes.serverUrl.newValue;
+});
 
 // ── SPA Navigation Patch ──────────────────────────────────────────────────────
 (function() {
