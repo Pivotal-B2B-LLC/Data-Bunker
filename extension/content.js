@@ -590,13 +590,19 @@ function walkUp(a) {
 }
 
 // ── Apollo.io ─────────────────────────────────────────────────────────────────
-// Apollo people search always puts person names in <a href="/people/..."> links.
-// We use those as anchors and walk up to the containing row/card to extract all fields.
+// Apollo's person name links in the table point to /contacts/{id}, NOT /people/.
+// /people/ is the search-page route (the URL you're currently on).
 function gatherApollo() {
   const blocks = [], seen = new Set();
 
-  const personLinks = document.querySelectorAll('a[href*="/people/"]');
-  console.log('[Data Bunker] gatherApollo() — person links found:', personLinks.length);
+  // Primary: person profile links (/contacts/{id})
+  // Fallback: any <a> inside a table cell that looks like a name
+  let personLinks = [...document.querySelectorAll('a[href*="/contacts/"]')];
+  // Deduplicate by href to avoid nav-menu duplicates
+  personLinks = personLinks.filter((a, idx, arr) =>
+    arr.findIndex(b => b.href === a.href) === idx
+  );
+  console.log('[Data Bunker] gatherApollo() — contact links found:', personLinks.length);
 
   for (const link of personLinks) {
     const name = cleanName(link.textContent.trim());
@@ -680,7 +686,7 @@ function apolloFindRow(link) {
   for (let i = 0; i < 8; i++) {
     if (!el.parentElement || el.parentElement === document.body) break;
     el = el.parentElement;
-    if (el.querySelectorAll('a[href*="/people/"]').length === 1) return el;
+    if (el.querySelectorAll('a[href*="/contacts/"]').length === 1) return el;
     if (el.tagName === 'TR' || el.tagName === 'LI') return el;
   }
   return link.closest('td') || link.parentElement;
@@ -704,7 +710,7 @@ function apolloCurrentPage() {
 }
 
 function getFirstApolloName() {
-  const links = document.querySelectorAll('a[href*="/people/"]');
+  const links = document.querySelectorAll('a[href*="/contacts/"]');
   for (const link of links) {
     const name = cleanName(link.textContent.trim());
     if (name && name.length > 2) return name;
@@ -796,17 +802,17 @@ async function runAutoApollo() {
   chrome.runtime.sendMessage({ type: 'SCRAPING_STARTED' }).catch(() => {});
 
   let consecutiveEmpty = 0;
-  const MAX_EMPTY = 3;
-  const MAX_PAGES = 100;
+  const MAX_EMPTY = 2;  // stop only after 2 pages in a row with 0 new leads
 
   try {
     while (!stopFlag && pages < MAX_PAGES) {
       const pn = apolloCurrentPage();
       console.log('[Data Bunker] ═══ Apollo page', pn, '═══');
 
-      // Wait for person links (they load asynchronously in the SPA)
+      // Wait for person contact links to load (async in the SPA)
+      // /contacts/{id} links are the actual person rows — not the /people nav link
       const hasResults = await waitFor(
-        () => document.querySelectorAll('a[href*="/people/"]').length >= 1,
+        () => document.querySelectorAll('a[href*="/contacts/"]').length >= 2,
         30000
       );
       if (!hasResults || stopFlag) break;
