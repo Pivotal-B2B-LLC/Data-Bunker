@@ -662,7 +662,13 @@ router.post('/leads', async (req, res) => {
         } catch (e) { stats.skipped++; continue; }
 
         // ── Step 5: Upsert contact ──
-        if (lead.linkedinUrl) {
+        // Only treat the URL as a LinkedIn URL if it's actually a LinkedIn link.
+        // Apollo /contacts/{id} URLs are NOT LinkedIn URLs — use name+company dedup for those.
+        const isLinkedInUrl = lead.linkedinUrl && lead.linkedinUrl.includes('linkedin.com/in/');
+        const apolloUrl    = (strategy === 'apollo' && lead.linkedinUrl && !isLinkedInUrl)
+          ? lead.linkedinUrl : null;
+
+        if (isLinkedInUrl) {
           const r = await client.query(`
             INSERT INTO contacts
               (first_name, last_name, job_title, email, phone_number, country, city,
@@ -694,13 +700,13 @@ router.post('/leads', async (req, res) => {
           if (r.rows[0]?.is_new) stats.saved++;
           else stats.updated++;
         } else {
-          // No LinkedIn URL — insert only if not duplicate by name+company
+          // No LinkedIn URL (or Apollo URL) — dedup by name+company, upsert existing rows
           const r = await client.query(`
             INSERT INTO contacts
               (first_name, last_name, job_title, email, phone_number, country, city,
                linked_account_id, seniority, industry_hint, email_format_guess,
                data_source, verified, confidence_score)
-            SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,true,70
+            SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,true,75
             WHERE NOT EXISTS (
               SELECT 1 FROM contacts
               WHERE LOWER(first_name) = LOWER($1)
@@ -715,9 +721,30 @@ router.post('/leads', async (req, res) => {
             accountId, lead.seniority || null, lead.industry || null, lead.emailFormatGuess || null,
             source || strategy || 'extension'
           ]);
-          if (r.rows[0]?.contact_id) touchedContactIds.push(r.rows[0].contact_id);
-          if (r.rows.length > 0) stats.saved++;
-          else stats.skipped++;
+          if (r.rows[0]?.contact_id) {
+            touchedContactIds.push(r.rows[0].contact_id);
+            stats.saved++;
+          } else {
+            // Already exists — try to update email/phone/title if we now have better data
+            await client.query(`
+              UPDATE contacts SET
+                job_title    = COALESCE(NULLIF($3,''), job_title),
+                email        = COALESCE(NULLIF($4,''), email),
+                phone_number = COALESCE(NULLIF($5,''), phone_number),
+                city         = COALESCE(NULLIF($6,''), city),
+                country      = COALESCE(NULLIF($7,''), country),
+                industry_hint= COALESCE(NULLIF($8,''), industry_hint)
+              WHERE LOWER(first_name) = LOWER($1)
+                AND LOWER(last_name)  = LOWER($2)
+                AND linked_account_id = $9
+            `, [
+              lead.firstName, lead.lastName,
+              lead.jobTitle || null, lead.email || null, lead.phone || null,
+              lead.city || null, lead.country || null, lead.industry || null,
+              accountId
+            ]);
+            stats.updated++;
+          }
         }
       } catch (blockErr) {
         console.warn('[leads] block processing error:', blockErr.message);
@@ -816,6 +843,9 @@ function parseLeadBlock(block, strategy, filters) {
   if (block.phone) lead.phone = block.phone;
   if (block.website) lead.website = block.website;
   if (block.linkedinUrl) lead.linkedinUrl = block.linkedinUrl;
+  // Apollo and other scrapers send company directly — use it
+  if (block.company) lead.company = block.company.trim();
+  if (block.industry) lead.industry = block.industry.trim();
 
   // Parse subtitle → jobTitle + company
   // ONLY extract company from explicit "Title at Company" pattern.

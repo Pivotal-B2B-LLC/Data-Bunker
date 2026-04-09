@@ -596,7 +596,6 @@ function gatherApollo() {
   const blocks = [], seen = new Set();
 
   // Primary: person profile links (/contacts/{id})
-  // Fallback: any <a> inside a table cell that looks like a name
   let personLinks = [...document.querySelectorAll('a[href*="/contacts/"]')];
   // Deduplicate by href to avoid nav-menu duplicates
   personLinks = personLinks.filter((a, idx, arr) =>
@@ -608,63 +607,134 @@ function gatherApollo() {
     const name = cleanName(link.textContent.trim());
     if (!name || name.length < 2) continue;
 
-    // Deduplicate by normalised name
     const nameKey = name.toLowerCase().replace(/\s+/g, '');
     if (seen.has(nameKey)) continue;
     seen.add(nameKey);
 
-    // Walk up to the containing row or card boundary
+    // Walk up to the containing row boundary
     const row = link.closest('tr') || link.closest('[role="row"]') || apolloFindRow(link);
     if (!row) continue;
 
-    // Get text lines from row, stripping Apollo's locked-feature button labels
+    // ── Extract every visible cell in the row ─────────────────────────────────
+    // Apollo table column order (from the pasted UI):
+    //   Name | Job title | Company | Emails | Phone numbers | Qualify | Actions | Links | Score | Location | Company · # Employees | Company · Industries | Company · Keywords
+
+    let title = '', company = '', email = '', phone = '', location = '';
+    let employees = '', industry = '', keywords = '';
+
+    // --- Company: prefer a company link ---
+    const compLink = row.querySelector('a[href*="/companies/"], a[href*="#/accounts/"]');
+    if (compLink) company = compLink.textContent.trim();
+
+    // --- Email: mailto link or email pattern ---
+    const mailtoLink = row.querySelector('a[href^="mailto:"]');
+    if (mailtoLink) email = mailtoLink.href.replace('mailto:', '').trim();
+    if (!email) {
+      const em = (row.innerText || '').match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/);
+      if (em) email = em[0];
+    }
+
+    // --- Phone: visible phone number ---
+    const ph = (row.innerText || '').match(/[\+]?[\d][\d\s\-().]{6,16}[\d]/);
+    if (ph) phone = ph[0].trim();
+
+    // --- Parse text lines, stripping Apollo's UI chrome ---
+    const APOLLO_UI_NOISE = /^(access email|access mobile|click to run|qualify contact|qualify account|actions|links|score|add to list|name|job title|company|emails|phone numbers|location|# employees|industries|keywords|save contact|lists|sequence)$/i;
     const lines = (row.innerText || '')
       .split('\n')
       .map(l => l.trim())
-      .filter(l => l.length > 0 &&
-        !/^(access email|access mobile|click to run|qualify contact|qualify account|actions|links|score|add to list|name|job title|company|emails|phone numbers|location|# employees|industries|keywords)$/i.test(l) &&
-        !/^\+\d+$/.test(l)); // strip "+63" keyword-count suffixes
+      .filter(l => l.length > 0 && !APOLLO_UI_NOISE.test(l) && !/^\+\d+$/.test(l));
 
-    // Name position in cleaned lines
+    // Name position
     const nameIdx = lines.findIndex(l => l.toLowerCase() === name.toLowerCase());
 
-    // Title: line immediately after name
-    const titleIdx = nameIdx >= 0 ? nameIdx + 1 : 1;
-    const title = (titleIdx < lines.length && lines[titleIdx] &&
-      !/^(access|click|qualify)/i.test(lines[titleIdx]) &&
-      lines[titleIdx].length < 120) ? lines[titleIdx] : '';
-
-    // Company: prefer visible company link, then line after title
-    const compLink = row.querySelector('a[href*="/companies/"], a[href*="#/accounts/"]');
-    const company = compLink
-      ? compLink.textContent.trim()
-      : (titleIdx + 1 < lines.length ? lines[titleIdx + 1] : '');
-
-    // Location: any line matching "City, Country"
-    let location = '';
-    for (const line of lines) {
-      if (/,\s*(United Kingdom|United States|Canada|Australia|Germany|France|India|[A-Z][\w\s]{2,20})\s*$/.test(line)) {
-        location = line; break;
+    // Title: line right after name
+    if (nameIdx >= 0 && nameIdx + 1 < lines.length) {
+      const candidate = lines[nameIdx + 1];
+      if (!/^(access|click|qualify|save)/i.test(candidate) && candidate.length < 120) {
+        title = candidate;
       }
     }
 
-    // Email (usually locked on Apollo free, but try in case it's visible)
-    const em = (row.innerText || '').match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/);
+    // Company from lines if link didn't get it
+    if (!company && nameIdx >= 0) {
+      // Company is typically 2 lines after name (after title)
+      const compIdx = nameIdx + 2;
+      if (compIdx < lines.length) {
+        const candidate = lines[compIdx];
+        // Skip if it looks like a number, email, phone, or UI label
+        if (candidate && candidate.length > 1 && candidate.length < 100 &&
+            !/^[\d\s\-+()]+$/.test(candidate) &&
+            !candidate.includes('@') &&
+            !/^(access|click|qualify|london|united|new york)/i.test(candidate)) {
+          company = candidate;
+        }
+      }
+    }
 
-    const rawText = lines.join(' | ').slice(0, 800);
+    // Location: match known country/city patterns
+    for (const line of lines) {
+      if (/,\s*(United Kingdom|United States|USA|UK|Canada|Australia|Germany|France|Netherlands|India|Singapore|UAE|Ireland|Spain|Italy|Poland|Sweden|Norway|Denmark|Finland|Belgium|Switzerland|New Zealand)/i.test(line)) {
+        location = line; break;
+      }
+    }
+    if (!location) {
+      // Broader: "City, Country" — two capitalised words separated by comma
+      for (const line of lines) {
+        if (/^[A-Z][a-z][\w\s]+,\s*[A-Z][\w\s]+$/.test(line) && line.length < 60) {
+          location = line; break;
+        }
+      }
+    }
+
+    // Employee count: a standalone number or range in lines
+    for (const line of lines) {
+      if (/^\d[\d,]*(\s*[-–]\s*\d[\d,]*)?(\s*(employees?|people|staff))?$/i.test(line)) {
+        employees = line; break;
+      }
+    }
+
+    // Industry + keywords: everything after the location that isn't a number/noise
+    // Apollo shows: "Information Technology & Services" then keyword tags
+    const locationIdx = location ? lines.indexOf(location) : -1;
+    const afterLocation = locationIdx >= 0 ? lines.slice(locationIdx + 1) : [];
+    for (const line of afterLocation) {
+      if (!line || /^\d/.test(line)) continue;
+      if (!industry && line.length > 3) { industry = line; continue; }
+      if (industry && line.length > 2 && !employees) { keywords += (keywords ? ', ' : '') + line; }
+    }
+
+    // Build a richly labelled rawText so the backend AI can parse everything
+    const rawParts = [`Name: ${name}`];
+    if (title)     rawParts.push(`Title: ${title}`);
+    if (company)   rawParts.push(`Company: ${company}`);
+    if (location)  rawParts.push(`Location: ${location}`);
+    if (email)     rawParts.push(`Email: ${email}`);
+    if (phone)     rawParts.push(`Phone: ${phone}`);
+    if (employees) rawParts.push(`Employees: ${employees}`);
+    if (industry)  rawParts.push(`Industry: ${industry}`);
+    if (keywords)  rawParts.push(`Keywords: ${keywords}`);
 
     blocks.push({
-      name, subtitle: title, company,
-      email: em?.[0] || '', location,
-      rawText, type: 'apollo_card'
+      name,
+      subtitle: title,         // → parseLeadBlock reads this as jobTitle
+      company,                  // → parseLeadBlock will now read this directly
+      location,
+      email,
+      phone,
+      industry,
+      employees,
+      keywords,
+      rawText: rawParts.join(' | ').slice(0, 800),
+      type: 'apollo_card'
     });
   }
 
   console.log('[Data Bunker] gatherApollo() TOTAL:', blocks.length);
 
-  // Fallback: plain table rows when person links aren't present
+  // Fallback: plain table rows when contact links aren't present
   if (blocks.length === 0) {
-    console.log('[Data Bunker] No person links — trying table rows');
+    console.log('[Data Bunker] No contact links — trying table row fallback');
     const rows = Array.from(document.querySelectorAll('tr[class*="zp_"], table tbody tr'))
       .filter(r => r.querySelectorAll('td').length >= 2 && (r.innerText || '').trim().length > 20);
     for (const row of rows) {
