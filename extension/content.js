@@ -590,40 +590,46 @@ function walkUp(a) {
 }
 
 // ── Apollo.io ─────────────────────────────────────────────────────────────────
-// Apollo's person name links in the table point to /contacts/{id}, NOT /people/.
-// /people/ is the search-page route (the URL you're currently on).
+// Apollo uses hash routing (#/people?page=N). Person name links are /#/people/{ObjectId}
+// WITHOUT ?overrideScoreId (the avatar/score links also use /#/people/ but have that query).
+// There are NO <tr>/<td> elements — Apollo uses a pure div/CSS-grid layout.
+function isApolloPersonLink(a) {
+  return !a.href.includes('overrideScoreId') && /\/people\/[a-f0-9]{15,}/.test(a.href);
+}
+
 function gatherApollo() {
   const blocks = [], seen = new Set();
 
-  // Primary: person profile links (/contacts/{id})
-  let personLinks = [...document.querySelectorAll('a[href*="/contacts/"]')];
-  // Deduplicate by href to avoid nav-menu duplicates
-  personLinks = personLinks.filter((a, idx, arr) =>
+  // Primary: person name links — /#/people/{ObjectId} without ?overrideScoreId
+  const personLinks = [...document.querySelectorAll('a[href*="/people/"]')]
+    .filter(isApolloPersonLink);
+  // Deduplicate by Apollo person ObjectId
+  const uniqueLinks = personLinks.filter((a, idx, arr) =>
     arr.findIndex(b => b.href === a.href) === idx
   );
-  console.log('[Data Bunker] gatherApollo() — contact links found:', personLinks.length);
+  console.log('[Data Bunker] gatherApollo() — person name links found:', uniqueLinks.length);
 
-  for (const link of personLinks) {
+  for (const link of uniqueLinks) {
+    const apolloId = (link.href.match(/\/people\/([a-f0-9]{15,})/) || [])[1] || '';
+    if (!apolloId || seen.has(apolloId)) continue;
+    seen.add(apolloId);
+
     const name = cleanName(link.textContent.trim());
     if (!name || name.length < 2) continue;
 
-    const nameKey = name.toLowerCase().replace(/\s+/g, '');
-    if (seen.has(nameKey)) continue;
-    seen.add(nameKey);
-
-    // Walk up to the containing row boundary
-    const row = link.closest('tr') || link.closest('[role="row"]') || apolloFindRow(link);
+    // Walk up to the containing row boundary (Apollo uses divs, not <tr>)
+    const row = link.closest('[role="row"]') || apolloFindRow(link);
     if (!row) continue;
 
     // ── Extract every visible cell in the row ─────────────────────────────────
-    // Apollo table column order (from the pasted UI):
-    //   Name | Job title | Company | Emails | Phone numbers | Qualify | Actions | Links | Score | Location | Company · # Employees | Company · Industries | Company · Keywords
+    // Apollo column order: Name | Job title | Company | Emails | Phone numbers |
+    //   Qualify | Actions | Links | Score | Location | # Employees | Industries | Keywords
 
     let title = '', company = '', email = '', phone = '', location = '';
     let employees = '', industry = '', keywords = '';
 
-    // --- Company: prefer a company link ---
-    const compLink = row.querySelector('a[href*="/companies/"], a[href*="#/accounts/"]');
+    // --- Company: prefer a company/organizations link ---
+    const compLink = row.querySelector('a[href*="/organizations/"], a[href*="/companies/"], a[href*="#/accounts/"]');
     if (compLink) company = compLink.textContent.trim();
 
     // --- Email: mailto link or email pattern ---
@@ -732,14 +738,20 @@ function gatherApollo() {
 
   console.log('[Data Bunker] gatherApollo() TOTAL:', blocks.length);
 
-  // Fallback: plain table rows when contact links aren't present
+  // Fallback: div row containers when person links have no text (rare)
   if (blocks.length === 0) {
-    console.log('[Data Bunker] No contact links — trying table row fallback');
-    const rows = Array.from(document.querySelectorAll('tr[class*="zp_"], table tbody tr'))
-      .filter(r => r.querySelectorAll('td').length >= 2 && (r.innerText || '').trim().length > 20);
-    for (const row of rows) {
-      const raw = (row.innerText || '').replace(/\s+/g, ' ').trim();
-      if (!/[A-Z][a-z]+ [A-Z][a-z]+/.test(raw)) continue;
+    console.log('[Data Bunker] No person link text — trying zp_ div row fallback');
+    // Apollo row divs often share a consistent zp_ class; find ones with both a person and an org link
+    const candidateDivs = [...document.querySelectorAll('div[class*="zp_"]')]
+      .filter(div => {
+        const hasName = [...div.querySelectorAll('a[href*="/people/"]')].some(isApolloPersonLink);
+        const hasOrg  = div.querySelector('a[href*="/organizations/"]');
+        const childDivs = div.querySelectorAll('div[class*="zp_"]').length;
+        return hasName && hasOrg && childDivs < 5; // leaf-level row
+      });
+    for (const div of candidateDivs) {
+      const raw = (div.innerText || '').replace(/\s+/g, ' ').trim();
+      if (!raw || raw.length < 10) continue;
       const key = raw.slice(0, 80);
       if (seen.has(key)) continue;
       seen.add(key);
@@ -751,15 +763,22 @@ function gatherApollo() {
 }
 
 function apolloFindRow(link) {
-  // Walk up until a container that has exactly 1 person link (clean row boundary)
+  // Walk up from a clean person name link until a container holds exactly 1 such link.
+  // Apollo uses div+CSS grid, so we can't rely on <tr>.
   let el = link;
-  for (let i = 0; i < 8; i++) {
+  let prev = link;
+  for (let i = 0; i < 12; i++) {
     if (!el.parentElement || el.parentElement === document.body) break;
+    prev = el;
     el = el.parentElement;
-    if (el.querySelectorAll('a[href*="/contacts/"]').length === 1) return el;
-    if (el.tagName === 'TR' || el.tagName === 'LI') return el;
+    const cleanLinks = [...el.querySelectorAll('a[href*="/people/"]')].filter(isApolloPersonLink);
+    // Exactly 1 clean person link in this container = it's the row boundary
+    if (cleanLinks.length === 1 && cleanLinks[0].href === link.href) return el;
+    // More than 1 = we've overshot into the list container — go back
+    if (cleanLinks.length > 1) return prev;
+    if (el.tagName === 'LI') return el;
   }
-  return link.closest('td') || link.parentElement;
+  return link.parentElement;
 }
 
 // ── Apollo Helpers ─────────────────────────────────────────────────────────────
@@ -780,7 +799,7 @@ function apolloCurrentPage() {
 }
 
 function getFirstApolloName() {
-  const links = document.querySelectorAll('a[href*="/contacts/"]');
+  const links = [...document.querySelectorAll('a[href*="/people/"]')].filter(isApolloPersonLink);
   for (const link of links) {
     const name = cleanName(link.textContent.trim());
     if (name && name.length > 2) return name;
@@ -879,10 +898,11 @@ async function runAutoApollo() {
       const pn = apolloCurrentPage();
       console.log('[Data Bunker] ═══ Apollo page', pn, '═══');
 
-      // Wait for person contact links to load (async in the SPA)
-      // /contacts/{id} links are the actual person rows — not the /people nav link
+      // Wait for person name links to load (SPA async render)
+      // Filter to clean /#/people/{ObjectId} links (exclude ?overrideScoreId avatar links)
       const hasResults = await waitFor(
-        () => document.querySelectorAll('a[href*="/contacts/"]').length >= 2,
+        () => [...document.querySelectorAll('a[href*="/people/"]')]
+          .filter(isApolloPersonLink).length >= 2,
         30000
       );
       if (!hasResults || stopFlag) break;
