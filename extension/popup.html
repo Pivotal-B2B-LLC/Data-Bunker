@@ -4,6 +4,17 @@
   <meta charset="utf-8">
   <title>Data Bunker</title>
   <link rel="stylesheet" href="popup.css">
+  <style>
+    /* Tab bar for site modes */
+    .tab-bar{display:flex;border-bottom:1px solid var(--border);background:var(--bg2);padding:0 14px;gap:2px;overflow-x:auto}
+    .tab{padding:9px 13px;font-size:11px;font-weight:700;letter-spacing:.6px;color:var(--muted);cursor:pointer;border:none;background:none;border-bottom:2px solid transparent;transition:all .2s;white-space:nowrap}
+    .tab.active{color:var(--accent2);border-bottom-color:var(--accent2)}
+    .tab:hover:not(.active){color:var(--text)}
+    /* site mode sub-tab */
+    .mode-section{display:none}.mode-section.active{display:block}
+    /* OC jurisdiction select */
+    select.oc-jur{width:100%;padding:5px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg2);color:var(--text);font-size:11px;outline:none;margin-bottom:6px}
+  </style>
 </head>
 <body>
   <div class="shell">
@@ -46,10 +57,11 @@
     <div id="idlePanel" class="panel text-center hidden">
       <div class="panel-icon">🔍</div>
       <p class="panel-title">Navigate to a page to scrape</p>
-      <p class="panel-sub">Open LinkedIn search, Apollo, Google Maps, Yelp, or any business directory.</p>
+      <p class="panel-sub">Open any supported site or paste a URL below.</p>
       <div style="display:flex;flex-direction:column;gap:6px;align-items:center">
         <a href="https://www.linkedin.com/search/results/people/" target="_blank" class="btn btn-outline" style="display:inline-block;flex:none;padding:7px 14px">💼 LinkedIn Search ↗</a>
-        <a href="https://app.apollo.io/#/people" target="_blank" class="btn btn-outline" style="display:inline-block;flex:none;padding:7px 14px">🚀 Apollo.io People ↗</a>
+        <a href="https://app.apollo.io/#/people" target="_blank" class="btn btn-outline" style="display:inline-block;flex:none;padding:7px 14px">🚀 Apollo.io ↗</a>
+        <a href="https://opencorporates.com/companies" target="_blank" class="btn btn-outline" style="display:inline-block;flex:none;padding:7px 14px">🏛️ OpenCorporates ↗</a>
         <a href="https://www.google.com/maps" target="_blank" class="btn btn-outline" style="display:inline-block;flex:none;padding:7px 14px">🗺️ Google Maps ↗</a>
       </div>
     </div>
@@ -69,7 +81,7 @@
       <div id="queueStatus" class="status-msg hidden" style="margin-top:6px;margin-bottom:0;font-size:11px"></div>
     </div>
 
-    <!-- ═══ GO TO URL — paste a link and scrape it ═══ -->
+    <!-- ═══ GO TO URL ═══ -->
     <div id="goUrlSection" class="panel" style="padding:8px 14px;border-bottom:1px solid var(--border)">
       <div style="display:flex;gap:6px;align-items:center">
         <input id="goUrlInput" type="url" placeholder="Paste URL to scrape…"
@@ -79,100 +91,170 @@
       </div>
     </div>
 
-    <!-- ═══ UNIVERSAL PANEL (any non-LinkedIn site) ═══ -->
-    <div id="universalPanel" class="panel hidden">
+    <!-- ═══ UNIFIED SCRAPER PANEL — shown for all active sites ═══ -->
+    <div id="mainPanel" class="hidden">
 
-      <div class="section">
-        <div class="section-label">SCAN PAGE</div>
-        <p style="font-size:11px;color:var(--muted);margin-bottom:8px">Detects leads from any page — cards, tables, lists, directories.</p>
-        <button id="btnScan" class="btn btn-primary" style="width:100%">🔍 Scan for Leads</button>
-        <div id="scanResult" class="scan-result hidden"></div>
-      </div>
+      <!-- Tab bar: LinkedIn | Apollo | OpenCorporates | Other -->
+      <nav class="tab-bar">
+        <button class="tab" data-tab="linkedin">💼 LinkedIn</button>
+        <button class="tab" data-tab="apollo">🚀 Apollo</button>
+        <button class="tab" data-tab="opencorporates">🏛️ OpenCorp</button>
+        <button class="tab" data-tab="other">🌐 Other</button>
+      </nav>
 
-      <div id="extractSection" class="section hidden">
-        <button id="btnExtract" class="btn btn-teal" style="width:100%">⚡ Extract & Save to Database</button>
-        <div id="saveResult" class="save-result hidden"></div>
-      </div>
+      <!-- ── LINKEDIN TAB ── -->
+      <div id="tab-linkedin" class="mode-section panel">
 
-      <a id="dashLinkUniversal" href="http://localhost:3000/contacts" target="_blank" class="dash-link">View in Dashboard ↗</a>
-    </div>
-
-    <!-- ═══ APOLLO PANEL ═══ -->
-    <div id="apolloPanel" class="panel hidden">
-      <div class="section">
-        <div class="section-label">APOLLO.IO</div>
-        <p style="font-size:11px;color:var(--muted);margin-bottom:8px">Auto-scrape Apollo people search results across all pages.</p>
-      </div>
-
-      <div class="stats-row" style="grid-template-columns:repeat(3,1fr)">
-        <div class="stat-box"><div id="apSaved" class="stat-val accent">0</div><div class="stat-key">SAVED</div></div>
-        <div class="stat-box"><div id="apPages" class="stat-val">0</div><div class="stat-key">PAGES</div></div>
-        <div class="stat-box"><div id="apTotal" class="stat-val dim">?</div><div class="stat-key">TOTAL</div></div>
-      </div>
-
-      <div id="apStatus" class="status-msg">Ready — press Start to scrape Apollo</div>
-
-      <div class="controls">
-        <button id="btnApStart" class="btn btn-primary">▶  START</button>
-        <button id="btnApStop" class="btn btn-danger" disabled>⏹  STOP</button>
-      </div>
-
-      <div class="section" style="margin-top:4px">
-        <button id="btnApScan" class="btn btn-teal" style="width:100%;font-size:11px">🔍 Scan & Save This Page Only</button>
-        <div id="apSaveResult" class="save-result hidden"></div>
-      </div>
-
-      <a id="dashLinkApollo" href="http://localhost:3000/contacts" target="_blank" class="dash-link">View in Dashboard ↗</a>
-    </div>
-
-    <!-- ═══ LINKEDIN PANEL ═══ -->
-    <div id="linkedinPanel" class="panel hidden">
-
-      <div class="section">
-        <div class="section-label">FILTERS</div>
-        <div id="filtersRow" class="filters-row">
-          <span class="no-filters">No filters detected</span>
+        <div class="section">
+          <div class="section-label">FILTERS</div>
+          <div id="filtersRow" class="filters-row">
+            <span class="no-filters">No filters detected</span>
+          </div>
         </div>
-      </div>
 
-      <div class="section">
-        <div class="progress-header">
-          <span class="section-label">PROGRESS</span>
-          <span id="progressPct" class="progress-pct">0%</span>
+        <div class="section">
+          <div class="progress-header">
+            <span class="section-label">PROGRESS</span>
+            <span id="progressPct" class="progress-pct">0%</span>
+          </div>
+          <div class="progress-track">
+            <div id="progressFill" class="progress-fill" style="width:0%"></div>
+          </div>
+          <div id="progressSub" class="progress-sub">Waiting…</div>
         </div>
-        <div class="progress-track">
-          <div id="progressFill" class="progress-fill" style="width:0%"></div>
+
+        <div class="stats-row">
+          <div class="stat-box"><div id="statSaved" class="stat-val accent">0</div><div class="stat-key">SAVED</div></div>
+          <div class="stat-box"><div id="statPages" class="stat-val">0</div><div class="stat-key">PAGES</div></div>
+          <div class="stat-box"><div id="statErrors" class="stat-val dim">0</div><div class="stat-key">ERRORS</div></div>
+          <div class="stat-box"><div id="statTotal" class="stat-val dim">?</div><div class="stat-key">TOTAL</div></div>
         </div>
-        <div id="progressSub" class="progress-sub">Waiting…</div>
+
+        <div id="detectedBar" class="detected-bar hidden">
+          <span class="detected-dot"></span>
+          <span id="detectedLabel">—</span>
+        </div>
+
+        <div id="statusMsg" class="status-msg">Ready — press Start to begin</div>
+
+        <div class="controls">
+          <button id="btnStart" class="btn btn-primary">▶  START</button>
+          <button id="btnStop" class="btn btn-danger" disabled>⏹  STOP</button>
+        </div>
+
+        <div class="section" style="margin-top:4px">
+          <button id="btnLiScan" class="btn btn-teal" style="width:100%;font-size:11px">🔍 Scan &amp; Save This Page Only</button>
+          <div id="liSaveResult" class="save-result hidden"></div>
+        </div>
+
+        <a id="dashLinkLinkedIn" href="http://localhost:3000/contacts" target="_blank" class="dash-link">View in Dashboard ↗</a>
       </div>
 
-      <div class="stats-row">
-        <div class="stat-box"><div id="statSaved" class="stat-val accent">0</div><div class="stat-key">SAVED</div></div>
-        <div class="stat-box"><div id="statPages" class="stat-val">0</div><div class="stat-key">PAGES</div></div>
-        <div class="stat-box"><div id="statErrors" class="stat-val dim">0</div><div class="stat-key">ERRORS</div></div>
-        <div class="stat-box"><div id="statTotal" class="stat-val dim">?</div><div class="stat-key">TOTAL</div></div>
+      <!-- ── APOLLO TAB ── -->
+      <div id="tab-apollo" class="mode-section panel">
+
+        <div class="section">
+          <div class="section-label">APOLLO.IO — AUTO-SCRAPE</div>
+          <p style="font-size:11px;color:var(--muted);margin-bottom:8px">Scrapes all pages of Apollo people search. Uses Apollo-specific row detection.</p>
+        </div>
+
+        <div class="stats-row" style="grid-template-columns:repeat(3,1fr)">
+          <div class="stat-box"><div id="apSaved" class="stat-val accent">0</div><div class="stat-key">SAVED</div></div>
+          <div class="stat-box"><div id="apPages" class="stat-val">0</div><div class="stat-key">PAGES</div></div>
+          <div class="stat-box"><div id="apTotal" class="stat-val dim">?</div><div class="stat-key">TOTAL</div></div>
+        </div>
+
+        <div id="apStatus" class="status-msg">Ready — navigate to Apollo people search then press Start</div>
+
+        <div class="controls">
+          <button id="btnApStart" class="btn btn-primary">▶  START</button>
+          <button id="btnApStop" class="btn btn-danger" disabled>⏹  STOP</button>
+        </div>
+
+        <div class="section" style="margin-top:4px">
+          <button id="btnApScan" class="btn btn-teal" style="width:100%;font-size:11px">🔍 Scan &amp; Save This Page Only</button>
+          <div id="apSaveResult" class="save-result hidden"></div>
+        </div>
+
+        <a id="dashLinkApollo" href="http://localhost:3000/contacts" target="_blank" class="dash-link">View in Dashboard ↗</a>
       </div>
 
-      <div id="detectedBar" class="detected-bar hidden">
-        <span class="detected-dot"></span>
-        <span id="detectedLabel">—</span>
+      <!-- ── OPENCORPORATES TAB ── -->
+      <div id="tab-opencorporates" class="mode-section panel">
+
+        <div class="section">
+          <div class="section-label">OPENCORPORATES — COMPANY SEARCH</div>
+          <p style="font-size:11px;color:var(--muted);margin-bottom:8px">Search &amp; auto-scrape company registries across 140+ jurisdictions.</p>
+          <div style="display:flex;gap:6px;margin-bottom:6px">
+            <input id="ocSearchInput" type="text" placeholder="Search companies…"
+              style="flex:1;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg2);color:var(--text);font-size:11px;outline:none">
+            <button id="btnOcSearch" class="btn btn-teal" style="flex:none;padding:6px 10px;font-size:11px">🔍</button>
+          </div>
+          <select id="ocJurisdiction" class="oc-jur">
+            <option value="">All Jurisdictions</option>
+            <option value="gb">🇬🇧 United Kingdom</option>
+            <option value="us_de">🇺🇸 US – Delaware</option>
+            <option value="us_ca">🇺🇸 US – California</option>
+            <option value="us_ny">🇺🇸 US – New York</option>
+            <option value="us_fl">🇺🇸 US – Florida</option>
+            <option value="us_tx">🇺🇸 US – Texas</option>
+            <option value="ie">🇮🇪 Ireland</option>
+            <option value="au">🇦🇺 Australia</option>
+            <option value="nz">🇳🇿 New Zealand</option>
+            <option value="ca_on">🇨🇦 Canada – Ontario</option>
+            <option value="de">🇩🇪 Germany</option>
+            <option value="fr">🇫🇷 France</option>
+            <option value="nl">🇳🇱 Netherlands</option>
+            <option value="sg">🇸🇬 Singapore</option>
+          </select>
+        </div>
+
+        <div class="stats-row" style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:10px">
+          <div class="stat"><div id="ocSaved" class="stat-value accent">0</div><div class="stat-label">SAVED</div></div>
+          <div class="stat"><div id="ocPages" class="stat-value">0</div><div class="stat-label">PAGES</div></div>
+          <div class="stat"><div id="ocTotal" class="stat-value dim">?</div><div class="stat-label">TOTAL</div></div>
+        </div>
+
+        <div id="ocStatus" class="status-badge">Ready — search or scrape the current OC page</div>
+
+        <div class="btn-row">
+          <button id="btnOcToggle" class="btn btn-accent" style="flex:1">▶  START SCRAPING</button>
+          <button id="btnOcScan" class="btn btn-glass" style="flex:none;padding:9px 12px;font-size:11px">🔍 Scan Page</button>
+        </div>
+        <div id="ocSaveResult" class="toast hidden" style="margin-top:6px"></div>
+
+        <a id="dashLinkOC" href="http://localhost:3000/contacts" target="_blank" class="dash-link">View in Dashboard ↗</a>
       </div>
 
-      <div id="statusMsg" class="status-msg">Ready — press Start to begin</div>
+      <!-- ── OTHER TAB — generic scraper for any page ── -->
+      <div id="tab-other" class="mode-section panel">
 
-      <div class="controls">
-        <button id="btnStart" class="btn btn-primary">▶  START</button>
-        <button id="btnStop" class="btn btn-danger" disabled>⏹  STOP</button>
+        <div class="section">
+          <div class="section-label">GENERIC SCRAPER</div>
+          <p style="font-size:11px;color:var(--muted);margin-bottom:8px">Works on any website — tables, card lists, directories, CRMs. Scans for repeating patterns and extracts contact data automatically.</p>
+          <button id="btnOtherScan" class="btn btn-primary" style="width:100%">🔍 Scan This Page for Leads</button>
+          <div id="otherScanResult" class="scan-result hidden"></div>
+        </div>
+
+        <div id="otherExtractSection" class="section hidden">
+          <button id="btnOtherExtract" class="btn btn-teal" style="width:100%">⚡ Extract &amp; Save All Leads</button>
+          <div id="otherSaveResult" class="save-result hidden"></div>
+        </div>
+
+        <div id="otherAutoSection" class="section" style="border-top:1px solid var(--border);padding-top:12px">
+          <div class="section-label" style="margin-bottom:6px">AUTO-PAGINATE</div>
+          <p style="font-size:11px;color:var(--muted);margin-bottom:8px">Automatically scrape and advance through multiple pages (uses "Next" button detection).</p>
+          <div class="controls" style="margin-bottom:0">
+            <button id="btnOtherStart" class="btn btn-primary">▶  START AUTO</button>
+            <button id="btnOtherStop" class="btn btn-danger" disabled>⏹  STOP</button>
+          </div>
+          <div id="otherAutoStatus" class="status-msg" style="margin-top:10px;margin-bottom:0">Ready</div>
+        </div>
+
+        <a id="dashLinkOther" href="http://localhost:3000/contacts" target="_blank" class="dash-link">View in Dashboard ↗</a>
       </div>
 
-      <!-- One-click extract for manual use on LinkedIn -->
-      <div class="section" style="margin-top:4px">
-        <button id="btnLiScan" class="btn btn-teal" style="width:100%;font-size:11px">🔍 Scan & Save This Page Only</button>
-        <div id="liSaveResult" class="save-result hidden"></div>
-      </div>
-
-      <a id="dashLinkLinkedIn" href="http://localhost:3000/contacts" target="_blank" class="dash-link">View in Dashboard ↗</a>
-    </div>
+    </div><!-- /mainPanel -->
 
   </div>
   <script src="popup.js"></script>

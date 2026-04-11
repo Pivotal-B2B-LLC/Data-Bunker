@@ -39,19 +39,21 @@ setTimeout(broadcastState, 1200);
 function getStrategy() {
   const h = location.hostname.toLowerCase();
   const u = location.href.toLowerCase();
-  if (h.includes('linkedin.com'))   return 'linkedin';
-  if (h.includes('apollo.io'))      return 'apollo';
+  if (h.includes('linkedin.com'))        return 'linkedin';
+  if (h.includes('apollo.io'))           return 'apollo';
   if (h.includes('google.com') && u.includes('/maps')) return 'maps';
-  if (h.includes('yelp.com'))       return 'yelp';
-  if (h.includes('yellowpages'))    return 'yellowpages';
-  if (h.includes('crunchbase.com')) return 'crunchbase';
-  if (h.includes('zoominfo.com'))   return 'zoominfo';
-  if (h.includes('hunter.io'))      return 'hunter';
+  if (h.includes('opencorporates.com'))  return 'opencorporates';
+  if (h.includes('yelp.com'))            return 'yelp';
+  if (h.includes('yellowpages'))         return 'yellowpages';
+  if (h.includes('crunchbase.com'))      return 'crunchbase';
+  if (h.includes('zoominfo.com'))        return 'zoominfo';
+  if (h.includes('hunter.io'))           return 'hunter';
   return 'generic';
 }
 
 const LABELS = {
   linkedin:'LinkedIn', apollo:'Apollo.io', maps:'Google Maps',
+  opencorporates:'OpenCorporates',
   yelp:'Yelp', yellowpages:'YellowPages', crunchbase:'Crunchbase',
   zoominfo:'ZoomInfo', hunter:'Hunter.io', generic:'Directory'
 };
@@ -187,8 +189,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       const strategy = getStrategy();
       if (strategy === 'apollo') {
         runAutoApollo().catch(e => reportError(e.message));
-      } else {
+      } else if (strategy === 'opencorporates') {
+        runAutoOpenCorporates().catch(e => reportError(e.message));
+      } else if (strategy === 'linkedin') {
         runAuto().catch(e => reportError(e.message));
+      } else {
+        // Generic auto-scraper for "Other" sites (uses nextPage button detection)
+        runAutoGeneric().catch(e => reportError(e.message));
       }
     }
     sendResponse({ ok: true });
@@ -197,7 +204,16 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
   if (msg.action === 'STOP') {
     stopFlag = true;
+    navPending = false;
+    chrome.storage.local.remove(['pendingAutoStart', 'pendingTabId']).catch(() => {});
     sendResponse({ ok: true });
+    return true;
+  }
+
+  if (msg.action === 'OC_DIAGNOSE') {
+    const diag = ocDiagnose();
+    console.log('[Data Bunker] OC DIAGNOSIS:', JSON.stringify(diag, null, 2));
+    sendResponse(diag);
     return true;
   }
 });
@@ -209,8 +225,8 @@ function buildState() {
     strategy: s, siteLabel: LABELS[s] || 'Page', url: location.href,
     isLinkedIn: s === 'linkedin', isSupported: true, isActive,
     leadsOnPage: pageLeads.length,
-    totalResults: s === 'linkedin' ? liTotalResults() : s === 'apollo' ? apolloTotalResults() : 0,
-    currentPage: s === 'linkedin' ? liCurrentPage() : s === 'apollo' ? apolloCurrentPage() : 0,
+    totalResults: s === 'linkedin' ? liTotalResults() : s === 'apollo' ? apolloTotalResults() : s === 'opencorporates' ? ocTotalResults() : 0,
+    currentPage: s === 'linkedin' ? liCurrentPage() : s === 'apollo' ? apolloCurrentPage() : s === 'opencorporates' ? ocCurrentPage() : 0,
     filters: s === 'linkedin' ? liFilters() : {},
   };
 }
@@ -223,10 +239,11 @@ function reportError(m)   { chrome.runtime.sendMessage({ type: 'ERROR', message:
 async function gatherBlocks() {
   const s = getStrategy();
   switch (s) {
-    case 'linkedin':    return gatherLinkedIn();
-    case 'apollo':      return gatherApollo();
-    case 'maps':        return gatherMaps();
-    case 'yelp':        return gatherCards('[class*="businessName"], [class*="container__09f24"]');
+    case 'linkedin':        return gatherLinkedIn();
+    case 'apollo':          return gatherApollo();
+    case 'maps':            return gatherMaps();
+    case 'opencorporates':  return gatherOpenCorporates();
+    case 'yelp':            return gatherCards('[class*="businessName"], [class*="container__09f24"]');
     case 'yellowpages': return gatherCards('.result, .listing, .info');
     case 'crunchbase':  return gatherCards('[class*="component--field-formatter"]');
     case 'zoominfo':    return gatherCards('[class*="tableRow"], [class*="listItem"]');
@@ -590,9 +607,10 @@ function walkUp(a) {
 }
 
 // ── Apollo.io ─────────────────────────────────────────────────────────────────
-// Apollo uses hash routing (#/people?page=N). Person name links are /#/people/{ObjectId}
-// WITHOUT ?overrideScoreId (the avatar/score links also use /#/people/ but have that query).
-// There are NO <tr>/<td> elements — Apollo uses a pure div/CSS-grid layout.
+// Apollo is a dynamic React app with heavy anti-scraping protections.
+// DO NOT spam queries or use simple querySelector loops only.
+// Strategy: wait for render, target rows by [role='row'] OR div structure,
+// extract by text patterns + position in DOM, deduplicate, rate limit.
 function isApolloPersonLink(a) {
   return !a.href.includes('overrideScoreId') && /\/people\/[a-f0-9]{15,}/.test(a.href);
 }
@@ -600,31 +618,52 @@ function isApolloPersonLink(a) {
 function gatherApollo() {
   const blocks = [], seen = new Set();
 
-  // Primary: person name links — /#/people/{ObjectId} without ?overrideScoreId
-  const personLinks = [...document.querySelectorAll('a[href*="/people/"]')]
-    .filter(isApolloPersonLink);
-  // Deduplicate by Apollo person ObjectId
-  const uniqueLinks = personLinks.filter((a, idx, arr) =>
-    arr.findIndex(b => b.href === a.href) === idx
-  );
-  console.log('[Data Bunker] gatherApollo() — person name links found:', uniqueLinks.length);
+  // Step 1: FIND ROW CONTAINERS
+  // Strategy A: [role='row'] elements (Apollo's table-like structure)
+  let rows = [...document.querySelectorAll('[role="row"]')];
 
-  for (const link of uniqueLinks) {
-    const apolloId = (link.href.match(/\/people\/([a-f0-9]{15,})/) || [])[1] || '';
-    if (!apolloId || seen.has(apolloId)) continue;
-    seen.add(apolloId);
+  // Strategy B: if no role=row, find repeated div containers with person links
+  if (rows.length < 2) {
+    const personLinks = [...document.querySelectorAll('a[href*="/people/"]')]
+      .filter(isApolloPersonLink);
+    // Deduplicate by href
+    const uniqueLinks = personLinks.filter((a, idx, arr) =>
+      arr.findIndex(b => b.href === a.href) === idx
+    );
+    // Walk up to row container for each link
+    for (const link of uniqueLinks) {
+      const row = apolloFindRow(link);
+      if (row && !rows.includes(row)) rows.push(row);
+    }
+  }
+  console.log('[Data Bunker] gatherApollo() — rows found:', rows.length);
 
-    const name = cleanName(link.textContent.trim());
+  // Noise lines in Apollo's row that should be stripped before parsing
+  const APOLLO_UI_NOISE = /^(access email|access mobile|click to run|qualify contact|qualify account|actions|links|score|add to list|name|job title|company|emails|phone numbers|location|# employees|industries|keywords|save contact|lists|sequence|\+\d+)$/i;
+
+  // Step 2: EXTRACT FIELDS per row using text patterns + position
+  for (const row of rows) {
+    // Find Apollo person ID from any person link in the row
+    const personLink = [...row.querySelectorAll('a[href*="/people/"]')].find(isApolloPersonLink);
+    const apolloId = personLink ? (personLink.href.match(/\/people\/([a-f0-9]{15,})/) || [])[1] || '' : '';
+    const rowKey = apolloId || (row.innerText || '').slice(0, 80);
+    if (!rowKey || seen.has(rowKey)) continue;
+    seen.add(rowKey);
+
+    // Parse row innerText — Apollo row format (newline-separated):
+    //   Name, Title, Company, noise, Location, employees, industry, keyword
+    const lines = (row.innerText || '')
+      .split('\n')
+      .map(l => l.trim())
+      .filter(l => l.length > 0 && !APOLLO_UI_NOISE.test(l));
+
+    if (lines.length === 0) continue;
+
+    // Line 0 = person name
+    const name = cleanName(lines[0]);
     if (!name || name.length < 2) continue;
 
-    // Walk up to the containing row boundary (Apollo uses divs, not <tr>)
-    const row = link.closest('[role="row"]') || apolloFindRow(link);
-    if (!row) continue;
-
     // ── Extract every visible cell in the row ─────────────────────────────────
-    // Apollo column order: Name | Job title | Company | Emails | Phone numbers |
-    //   Qualify | Actions | Links | Score | Location | # Employees | Industries | Keywords
-
     let title = '', company = '', email = '', phone = '', location = '';
     let employees = '', industry = '', keywords = '';
 
@@ -644,48 +683,29 @@ function gatherApollo() {
     const ph = (row.innerText || '').match(/[\+]?[\d][\d\s\-().]{6,16}[\d]/);
     if (ph) phone = ph[0].trim();
 
-    // --- Parse text lines, stripping Apollo's UI chrome ---
-    const APOLLO_UI_NOISE = /^(access email|access mobile|click to run|qualify contact|qualify account|actions|links|score|add to list|name|job title|company|emails|phone numbers|location|# employees|industries|keywords|save contact|lists|sequence)$/i;
-    const lines = (row.innerText || '')
-      .split('\n')
-      .map(l => l.trim())
-      .filter(l => l.length > 0 && !APOLLO_UI_NOISE.test(l) && !/^\+\d+$/.test(l));
+    // Title = line 1 (right after name)
+    if (lines.length > 1 && lines[1].length < 120 && !/^(access|click|qualify|save)/i.test(lines[1])) {
+      title = lines[1];
+    }
 
-    // Name position
-    const nameIdx = lines.findIndex(l => l.toLowerCase() === name.toLowerCase());
-
-    // Title: line right after name
-    if (nameIdx >= 0 && nameIdx + 1 < lines.length) {
-      const candidate = lines[nameIdx + 1];
-      if (!/^(access|click|qualify|save)/i.test(candidate) && candidate.length < 120) {
-        title = candidate;
+    // Company from line 2 if org link didn't get it
+    if (!company && lines.length > 2) {
+      const candidate = lines[2];
+      if (candidate.length > 1 && candidate.length < 100 &&
+          !/^[\d\s\-+()]+$/.test(candidate) &&
+          !candidate.includes('@') &&
+          !/^(access|click|qualify)/i.test(candidate)) {
+        company = candidate;
       }
     }
 
-    // Company from lines if link didn't get it
-    if (!company && nameIdx >= 0) {
-      // Company is typically 2 lines after name (after title)
-      const compIdx = nameIdx + 2;
-      if (compIdx < lines.length) {
-        const candidate = lines[compIdx];
-        // Skip if it looks like a number, email, phone, or UI label
-        if (candidate && candidate.length > 1 && candidate.length < 100 &&
-            !/^[\d\s\-+()]+$/.test(candidate) &&
-            !candidate.includes('@') &&
-            !/^(access|click|qualify|london|united|new york)/i.test(candidate)) {
-          company = candidate;
-        }
-      }
-    }
-
-    // Location: match known country/city patterns
+    // Location: line matching "City, Country" pattern
     for (const line of lines) {
-      if (/,\s*(United Kingdom|United States|USA|UK|Canada|Australia|Germany|France|Netherlands|India|Singapore|UAE|Ireland|Spain|Italy|Poland|Sweden|Norway|Denmark|Finland|Belgium|Switzerland|New Zealand)/i.test(line)) {
+      if (/,\s*(United Kingdom|United States|USA|UK|Canada|Australia|Germany|France|Netherlands|India|Singapore|UAE|Ireland|Spain|Italy|Poland|Sweden|Norway|Denmark|Finland|Belgium|Switzerland|New Zealand|Nigeria|Kenya|South Africa|Brazil|Mexico)/i.test(line)) {
         location = line; break;
       }
     }
     if (!location) {
-      // Broader: "City, Country" — two capitalised words separated by comma
       for (const line of lines) {
         if (/^[A-Z][a-z][\w\s]+,\s*[A-Z][\w\s]+$/.test(line) && line.length < 60) {
           location = line; break;
@@ -693,21 +713,20 @@ function gatherApollo() {
       }
     }
 
-    // Employee count: a standalone number or range in lines
+    // Employee count: standalone number (Apollo shows headcount like "5" or "201-500")
     for (const line of lines) {
-      if (/^\d[\d,]*(\s*[-–]\s*\d[\d,]*)?(\s*(employees?|people|staff))?$/i.test(line)) {
+      if (/^\d[\d,]*(\s*[-–]\s*\d[\d,]*)?$/.test(line)) {
         employees = line; break;
       }
     }
 
-    // Industry + keywords: everything after the location that isn't a number/noise
-    // Apollo shows: "Information Technology & Services" then keyword tags
+    // Industry + keywords: lines after location
     const locationIdx = location ? lines.indexOf(location) : -1;
-    const afterLocation = locationIdx >= 0 ? lines.slice(locationIdx + 1) : [];
+    const afterLocation = locationIdx >= 0 ? lines.slice(locationIdx + 1) : lines.slice(3);
     for (const line of afterLocation) {
       if (!line || /^\d/.test(line)) continue;
       if (!industry && line.length > 3) { industry = line; continue; }
-      if (industry && line.length > 2 && !employees) { keywords += (keywords ? ', ' : '') + line; }
+      if (industry && line.length > 2) { keywords += (keywords ? ', ' : '') + line; }
     }
 
     // Build a richly labelled rawText so the backend AI can parse everything
@@ -964,6 +983,741 @@ async function runAutoApollo() {
 }
 
 
+// ── OpenCorporates ────────────────────────────────────────────────────────────
+// DIAGNOSTIC: dumps page structure to help debug extraction failures
+function ocDiagnose() {
+  const result = {
+    url: location.href,
+    pathname: location.pathname,
+    strategy: getStrategy(),
+    bodyTextLength: (document.body.innerText || '').length,
+    // Count key element types
+    allLinks: document.querySelectorAll('a').length,
+    companyLinks: document.querySelectorAll('a[href*="/companies/"]').length,
+    officerLinks: document.querySelectorAll('a[href*="/officers/"]').length,
+    lis: document.querySelectorAll('li').length,
+    trs: document.querySelectorAll('tr').length,
+    uls: document.querySelectorAll('ul').length,
+    divs: document.querySelectorAll('div').length,
+    // Sample first 5 company links
+    sampleCompanyLinks: [...document.querySelectorAll('a[href*="/companies/"]')].slice(0, 5).map(a => ({
+      href: a.getAttribute('href'),
+      text: a.textContent.trim().slice(0, 80),
+      parentTag: a.parentElement?.tagName,
+      parentParentTag: a.parentElement?.parentElement?.tagName,
+      closestLi: a.closest('li') ? 'YES' : 'no',
+      closestTr: a.closest('tr') ? 'YES' : 'no',
+      closestDiv: a.closest('div')?.className?.slice(0, 50) || 'no class',
+      parentText: (a.parentElement?.innerText || '').slice(0, 200),
+    })),
+    // Sample body text (first 2000 chars)
+    bodyTextSample: (document.body.innerText || '').slice(0, 2000),
+    // Sample first 5 <li> contents
+    sampleLis: [...document.querySelectorAll('li')].slice(0, 10).map(li => ({
+      text: (li.innerText || '').slice(0, 150),
+      hasCompanyLink: li.querySelector('a[href*="/companies/"]') ? true : false,
+    })),
+  };
+  return result;
+}
+
+// OpenCorporates is server-rendered HTML (no SPA / lazy loading).
+// Page types handled:
+//   1. Company search  /companies?q=     /companies/{jur}?q=     → company records
+//   2. Company detail  /companies/{jur}/{number}                 → officers as person leads
+//   3. Officers search /officers?q=                             → person leads
+//
+// Extraction strategy:
+//   BLOCK-BASED EXTRACTION — DO NOT rely on class names.
+//   Use structure, text patterns, position in DOM.
+//   Strategy: find all <li>/<div> blocks, filter by content keywords, extract fields.
+function gatherOpenCorporates() {
+  const path = location.pathname;
+
+  // Route to sub-handlers by URL pattern
+  if (/^\/companies\/[a-z_]+\/[^/?#]+$/i.test(path)) {
+    return gatherOpenCorporatesCompanyPage();
+  }
+  if (/^\/officers\b/.test(path)) {
+    return gatherOpenCorporatesOfficers();
+  }
+
+  const blocks = [], seen = new Set();
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // PRIMARY STRATEGY: LINK-CENTRIC EXTRACTION
+  // Find ALL <a href="/companies/{jur}/{id}"> on the page.
+  // Extract company name from anchor text, metadata from surrounding context.
+  // This works regardless of the container structure (li, div, tr, span, etc.)
+  // ══════════════════════════════════════════════════════════════════════════
+  const companyLinks = [...document.querySelectorAll('a[href*="/companies/"]')];
+  const validLinks = companyLinks.filter(a => {
+    const href = a.getAttribute('href') || '';
+    // Must match /companies/{jurisdiction}/{id_or_slug}
+    return /\/companies\/[a-z_]{2,}\/[^/?#]+/i.test(href);
+  });
+  console.log('[Data Bunker] OC link-centric: found', validLinks.length, 'company links');
+
+  for (const a of validLinks) {
+    const companyName = a.textContent.trim();
+    if (!companyName || companyName.length < 2) continue;
+
+    // Skip nav/filter links (e.g. "Companies", "remove filter", short labels)
+    if (companyName.length > 200) continue;
+    if (/^(companies|officers|search|remove|filter|show|hide|view|more|next|prev)/i.test(companyName)) continue;
+
+    // Deduplicate
+    const key = companyName.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (!key || key.length < 3 || seen.has(key)) continue;
+    seen.add(key);
+
+    // JURISDICTION + NUMBER from href
+    const href = a.getAttribute('href') || '';
+    const hrefMatch = href.match(/\/companies\/([a-z_]+)\/([^/?#]+)/i);
+    const jurisdiction = hrefMatch ? hrefMatch[1] : '';
+    const companyNumber = hrefMatch ? hrefMatch[2] : '';
+
+    // CONTEXT TEXT: get text from parent or closest block (li, tr, div)
+    // This captures "(Jurisdiction, Date, Address)" text around the link
+    const container = a.closest('li') || a.closest('tr') || a.parentElement;
+    const contextText = container ? (container.innerText || '').trim() : '';
+
+    // Parse metadata from context text
+    // OC format: "COMPANY NAME (Jurisdiction, Date-, Address)"
+    let incorporationDate = '', address = '', status = '', companyType = '';
+
+    // DATE: "3 Sep 2015" or "2015-09-03" etc
+    const dateMatch = contextText.match(/\b(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4}|\d{4}-\d{2}-\d{2}|\d{1,2}\/\d{1,2}\/\d{4})\b/i);
+    if (dateMatch) incorporationDate = dateMatch[0];
+
+    // ADDRESS: parse from context text
+    // OC format: "COMPANY NAME (New York (US), 3 Sep 2015- , 100 MERIDIAN BLVD., ROCHESTER, NY, 14618)"
+    // Nested parens means we can't use simple [^)]+ — instead work with the full text
+    // Strategy: split by comma, find the date part, everything after it is address
+    const allParts = contextText.split(',').map(p => p.trim());
+    let addrStartIdx = -1;
+    for (let i = 0; i < allParts.length; i++) {
+      // The date part looks like "3 Sep 2015-" or "2015-09-03-"
+      if (/\d{4}\s*-/.test(allParts[i]) || /\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4}/i.test(allParts[i])) {
+        addrStartIdx = i + 1;
+        break;
+      }
+    }
+    if (addrStartIdx > 0 && addrStartIdx < allParts.length) {
+      // Remove trailing paren from last part
+      const addrParts = allParts.slice(addrStartIdx);
+      const last = addrParts[addrParts.length - 1].replace(/\)\s*$/, '').trim();
+      addrParts[addrParts.length - 1] = last;
+      address = addrParts.join(', ').trim();
+    }
+    if (!address) {
+      // Fallback: last 3 comma-separated chunks
+      if (allParts.length >= 3) address = allParts.slice(-3).join(', ').trim().replace(/\)\s*$/, '');
+    }
+
+    // STATUS
+    const statusMatch = contextText.match(/\b(active|inactive|dissolved|liquidation|struck off|in administration|closed|revoked|cancelled)\b/i);
+    if (statusMatch) status = statusMatch[0];
+
+    // COMPANY TYPE
+    const typeMatch = contextText.match(/\b(LLC|LTD\.?|INC\.?|PLC|CORP\.?|L\.?L\.?C\.?|P\.?C\.?|PARTNERSHIP|GMBH|PTY|S\.A\.|S\.R\.L|NONPROFIT)\b/i);
+    if (typeMatch) companyType = typeMatch[0];
+
+    // Build rawText
+    const rawParts = ['Company: ' + companyName];
+    if (companyNumber)     rawParts.push('Number: ' + companyNumber);
+    if (jurisdiction)      rawParts.push('Jurisdiction: ' + jurisdiction);
+    if (status)            rawParts.push('Status: ' + status);
+    if (companyType)       rawParts.push('Type: ' + companyType);
+    if (incorporationDate) rawParts.push('Incorporated: ' + incorporationDate);
+    if (address)           rawParts.push('Address: ' + address);
+    rawParts.push('Raw: ' + contextText.replace(/\n+/g, ' ').replace(/\s{2,}/g, ' ').slice(0, 400));
+
+    blocks.push({
+      name: companyName,
+      company: companyName,
+      rawText: rawParts.join(' | ').slice(0, 900),
+      location: address.slice(0, 200) || '',
+      type: 'opencorporates_company',
+      source: 'opencorporates',
+      companyNumber,
+      jurisdiction,
+      status,
+    });
+  }
+
+  console.log('[Data Bunker] OC link-centric extraction: got', blocks.length, 'companies');
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // FALLBACK: If link-centric fails, try block-based approaches
+  // ══════════════════════════════════════════════════════════════════════════
+  if (blocks.length === 0) {
+    console.log('[Data Bunker] OC link-centric found 0, trying block fallbacks');
+    let items = [];
+
+    // Fallback A: Largest repeating list
+    let bestList = null, bestCount = 0;
+    for (const list of document.querySelectorAll('ul, ol, tbody')) {
+      const children = list.querySelectorAll(':scope > li, :scope > tr');
+      if (children.length > bestCount) { bestCount = children.length; bestList = list; }
+    }
+    if (bestList && bestCount >= 3) {
+      items = [...bestList.querySelectorAll(':scope > li, :scope > tr')];
+      console.log('[Data Bunker] OC fallback-A (largest list):', items.length);
+    }
+
+    // Fallback B: Main content children
+    if (items.length === 0) {
+      const main = document.querySelector('main, #content, [role="main"], .content, .results');
+      if (main) {
+        items = [...main.querySelectorAll(':scope > *')].filter(el =>
+          (el.innerText || '').trim().length > 15 && (el.innerText || '').trim().length < 2000
+        );
+        console.log('[Data Bunker] OC fallback-B (main children):', items.length);
+      }
+    }
+
+    for (const item of items) {
+      const text = (item.innerText || '').trim();
+      if (!text || text.length < 8) continue;
+      let name = '';
+      const anchor = item.querySelector('a');
+      if (anchor) name = anchor.textContent.trim();
+      if (!name) name = text.split('\n')[0].trim().slice(0, 120);
+      if (!name || name.length < 2) continue;
+      const itemKey = name.toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (!itemKey || seen.has(itemKey)) continue;
+      seen.add(itemKey);
+
+      blocks.push({
+        name, company: name,
+        rawText: 'Company: ' + name + ' | Raw: ' + text.replace(/\n+/g, ' ').slice(0, 600),
+        location: '', type: 'opencorporates_company', source: 'opencorporates',
+        companyNumber: '', jurisdiction: '', status: '',
+      });
+    }
+    console.log('[Data Bunker] OC fallback extraction: got', blocks.length, 'total');
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // NUCLEAR FALLBACK: PURE TEXT-BASED EXTRACTION
+  // If DOM-based methods fail, parse document.body.innerText directly.
+  // OC results appear as lines like:
+  //   "APPLE ACQUISITIONS LLC (New York (US), 3 Sep 2015- , 123 MAIN ST, CITY, NY, 12345)"
+  // Each company name is typically ALL CAPS or Title Case, followed by parenthesized details.
+  // ══════════════════════════════════════════════════════════════════════════
+  if (blocks.length === 0) {
+    console.log('[Data Bunker] OC — trying pure text-based extraction from page text');
+    const bodyText = document.body.innerText || '';
+    const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l.length > 15);
+
+    for (const rawLine of lines) {
+      let line = rawLine;
+      // Strip leading non-ASCII (flag emojis) and country flag text
+      line = line.replace(/^[^\x20-\x7E]*\s*/, '');
+      line = line.replace(/^(?:United States|United Kingdom|Canada|Australia|Germany|France|Ireland|Netherlands|Singapore|New Zealand|Hong Kong|Japan|India|Brazil|Mexico|South Korea|China|Russia|Switzerland|Sweden|Norway|Denmark|Finland|Belgium|Austria|Spain|Italy|Portugal|Poland|Czech Republic|Israel|South Africa|Thailand|Philippines|Malaysia|Indonesia|Vietnam|Argentina|Chile|Colombia|Peru|Egypt|Turkey|Greece|Romania|Hungary|Bulgaria|Croatia|Serbia|Slovakia|Slovenia|Estonia|Latvia|Lithuania|Luxembourg|Malta|Cyprus|Iceland|Liechtenstein|Monaco|San Marino)\s+flag\s*/i, '');
+      line = line.replace(/^branch\s+/i, '');
+
+      // Find first ( and last ) — company name before (, details inside
+      const firstParen = line.indexOf('(');
+      const lastParen = line.lastIndexOf(')');
+      if (firstParen < 3 || lastParen <= firstParen) continue;
+
+      const companyName = line.slice(0, firstParen).trim();
+      const details = line.slice(firstParen + 1, lastParen).trim();
+
+      // Must contain a date to be a real result (not a nav link)
+      if (!/\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4}|\d{4}-\d{2}-\d{2}/i.test(details)) continue;
+
+      if (companyName.length < 3 || companyName.length > 200) continue;
+      if (/^(search|filter|found|showing|page|companies|officers|next|prev|open|the )/i.test(companyName)) continue;
+
+      const key = companyName.toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (!key || key.length < 3 || seen.has(key)) continue;
+      seen.add(key);
+
+      // Parse details: "New York (US), 3 Sep 2015- , ADDRESS PARTS"
+      const detailParts = details.split(',').map(p => p.trim());
+      let jurisdiction = '', incorporationDate = '', address = '';
+
+      if (detailParts.length > 0) {
+        jurisdiction = detailParts[0].replace(/\s*\([^)]*\)\s*/, '').trim();
+      }
+
+      let addrStart = -1;
+      for (let j = 0; j < detailParts.length; j++) {
+        const dm = detailParts[j].match(/(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4}|\d{4}-\d{2}-\d{2})/i);
+        if (dm) { incorporationDate = dm[1]; addrStart = j + 1; break; }
+      }
+      if (addrStart > 0 && addrStart < detailParts.length) {
+        address = detailParts.slice(addrStart).join(', ').trim();
+      }
+
+      let companyType = '';
+      const typeMatch = companyName.match(/\b(LLC|LTD\.?|INC\.?|PLC|CORP\.?|L\.?L\.?C\.?|P\.?C\.?)\b/i);
+      if (typeMatch) companyType = typeMatch[0];
+
+      const rawParts = ['Company: ' + companyName];
+      if (jurisdiction)      rawParts.push('Jurisdiction: ' + jurisdiction);
+      if (incorporationDate) rawParts.push('Incorporated: ' + incorporationDate);
+      if (address)           rawParts.push('Address: ' + address);
+      if (companyType)       rawParts.push('Type: ' + companyType);
+
+      blocks.push({
+        name: companyName, company: companyName,
+        rawText: rawParts.join(' | ').slice(0, 900),
+        location: address.slice(0, 200) || '',
+        type: 'opencorporates_company', source: 'opencorporates',
+        companyNumber: '', jurisdiction, status: '',
+      });
+    }
+    console.log('[Data Bunker] OC text-based extraction: got', blocks.length, 'companies');
+  }
+
+  // Final fallback
+  if (blocks.length === 0) {
+    console.log('[Data Bunker] OC — 0 from ALL strategies, trying gatherGeneric()');
+    return gatherGeneric();
+  }
+
+  console.log('[Data Bunker] gatherOpenCorporates() TOTAL:', blocks.length);
+  return blocks;
+}
+
+// Individual company page: extract directors/officers as person leads
+function gatherOpenCorporatesCompanyPage() {
+  const blocks = [];
+
+  // Company name from the page — try multiple approaches
+  let companyName = '';
+  const h1 = document.querySelector('h1');
+  if (h1) companyName = h1.textContent.trim();
+  if (!companyName) companyName = document.title.split(/[-|·—]/)[0].trim();
+
+  // OC officer list: look for officer-related sections
+  const officerSelectors = [
+    '#officers li',
+    '#directors li',
+    '#secretaries li',
+    'li.officer',
+    'ul.officers li',
+    '[class*="officer"] li',
+    '[id*="officer"] li',
+    '[id*="director"] li',
+  ];
+  let officerItems = [];
+  for (const sel of officerSelectors) {
+    try {
+      const found = document.querySelectorAll(sel);
+      if (found.length > 0) { officerItems = [...found]; break; }
+    } catch {}
+  }
+
+  // Fallback: scan for anchor links to /officers/
+  if (officerItems.length === 0) {
+    const officerLinks = document.querySelectorAll('a[href*="/officers/"]');
+    const linkSeen = new Set();
+    for (const a of officerLinks) {
+      const block = a.closest('li') || a.closest('div') || a.closest('tr') || a.parentElement;
+      if (block && !linkSeen.has(block)) { linkSeen.add(block); officerItems.push(block); }
+    }
+  }
+
+  const seen = new Set();
+  for (const item of officerItems) {
+    const nameEl = item.querySelector('a[href*="/officers/"], a[href*="/people/"], strong, b');
+    const rawName = nameEl ? nameEl.textContent.trim() : (item.innerText || '').split('\n')[0].trim();
+    const name = cleanName(rawName);
+    if (!name || name.length < 2 || seen.has(name.toLowerCase())) continue;
+    seen.add(name.toLowerCase());
+
+    const roleEl = item.querySelector('[class*="position"], [class*="role"], em');
+    const position = roleEl ? roleEl.textContent.trim() : '';
+
+    const dateEl = item.querySelector('[class*="start_date"], [class*="appointed"], time');
+    const dateStr = dateEl ? dateEl.textContent.trim() : '';
+
+    const rawText = ['Name: ' + name, position && 'Role: ' + position, dateStr && 'Appointed: ' + dateStr, 'Company: ' + companyName].filter(Boolean).join(' | ');
+    blocks.push({ name, subtitle: position, company: companyName, rawText, type: 'opencorporates_officer', source: 'opencorporates' });
+  }
+
+  // If no officers, capture the company itself
+  if (blocks.length === 0 && companyName) {
+    // Grab all page attribute text
+    const body = document.querySelector('main, #content, [role="main"], .content') || document.body;
+    const attrText = (body?.innerText || '').replace(/\n+/g, ' | ').replace(/\s{2,}/g, ' ').slice(0, 600);
+    blocks.push({ name: companyName, company: companyName, rawText: 'Company: ' + companyName + ' | ' + attrText, location: '', type: 'opencorporates_company', source: 'opencorporates' });
+  }
+
+  console.log('[Data Bunker] gatherOpenCorporatesCompanyPage() TOTAL:', blocks.length);
+  return blocks;
+}
+
+// Officers search results: /officers?q=...
+function gatherOpenCorporatesOfficers() {
+  const blocks = [], seen = new Set();
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // PRIMARY: LINK-CENTRIC — find all <a href="/officers/{id}"> links
+  // Each officer result has: officer link (name), company link, role/status text
+  // OC format: "JOHN SMITH, APPLE INC (New York (US), director, active)"
+  // ══════════════════════════════════════════════════════════════════════════
+  const officerLinks = [...document.querySelectorAll('a[href*="/officers/"]')];
+  const validLinks = officerLinks.filter(a => {
+    const href = a.getAttribute('href') || '';
+    return /\/officers\/\d+/i.test(href) || /\/officers\/[a-z0-9-]+/i.test(href);
+  });
+  console.log('[Data Bunker] OC officers link-centric: found', validLinks.length, 'officer links');
+
+  for (const a of validLinks) {
+    const rawName = a.textContent.trim();
+    if (!rawName || rawName.length < 2 || rawName.length > 200) continue;
+    if (/^(officers|search|remove|filter|show|hide|view|more|next|prev)/i.test(rawName)) continue;
+
+    const name = cleanName(rawName);
+    if (!name || name.length < 2) continue;
+
+    const nameKey = name.toLowerCase();
+    if (seen.has(nameKey)) continue;
+    seen.add(nameKey);
+
+    // Get context from container
+    const container = a.closest('li') || a.closest('tr') || a.parentElement;
+    const contextText = container ? (container.innerText || '').trim() : '';
+
+    // COMPANY: look for a /companies/ link in same container
+    let company = '';
+    if (container) {
+      const compLink = container.querySelector('a[href*="/companies/"]');
+      if (compLink) company = compLink.textContent.trim();
+    }
+    // Fallback: second link in context
+    if (!company && container) {
+      const allLinks = container.querySelectorAll('a');
+      for (const link of allLinks) {
+        if (link === a) continue;
+        const lt = link.textContent.trim();
+        if (lt && lt.length > 2 && lt !== name) { company = lt; break; }
+      }
+    }
+
+    // ROLE: extract from context text
+    const roleMatch = contextText.match(/\b(director|officer|secretary|manager|agent|trustee|member|partner|ceo|cfo|cto|treasurer|president|vice president|chairman|incorporator|subscriber|registered agent)\b/i);
+    const position = roleMatch ? roleMatch[0] : '';
+
+    // STATUS
+    const statusText = /inactive|resigned|terminated|removed|ceased/i.test(contextText) ? 'inactive' : 'active';
+
+    // DATE
+    let dateStr = '';
+    const dateMatch = contextText.match(/\b(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4}|\d{4}-\d{2}-\d{2})\b/i);
+    if (dateMatch) dateStr = dateMatch[0];
+
+    const rawParts = ['Name: ' + name];
+    if (position) rawParts.push('Role: ' + position);
+    if (company)  rawParts.push('Company: ' + company);
+    if (dateStr)  rawParts.push('Date: ' + dateStr);
+    rawParts.push('Status: ' + statusText);
+    rawParts.push('Raw: ' + contextText.replace(/\n+/g, ' ').slice(0, 400));
+
+    blocks.push({ name, subtitle: position, company, rawText: rawParts.join(' | ').slice(0, 900), type: 'opencorporates_officer', source: 'opencorporates' });
+  }
+
+  console.log('[Data Bunker] OC officers link-centric: got', blocks.length, 'officers');
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // FALLBACK: if no /officers/ links, try /companies/ links (some pages list
+  // officers alongside their companies)
+  // ══════════════════════════════════════════════════════════════════════════
+  if (blocks.length === 0) {
+    // Try largest repeating list
+    let bestList = null, bestCount = 0;
+    for (const list of document.querySelectorAll('ul, ol, tbody')) {
+      const children = list.querySelectorAll(':scope > li, :scope > tr');
+      if (children.length > bestCount) { bestCount = children.length; bestList = list; }
+    }
+    if (bestList && bestCount >= 3) {
+      const items = bestList.querySelectorAll(':scope > li, :scope > tr');
+      for (const item of items) {
+        const text = (item.innerText || '').trim();
+        if (!text || text.length < 5) continue;
+        const firstA = item.querySelector('a');
+        let name = firstA ? cleanName(firstA.textContent.trim()) : cleanName(text.split('\n')[0]);
+        if (!name || name.length < 2 || seen.has(name.toLowerCase())) continue;
+        seen.add(name.toLowerCase());
+
+        let company = '';
+        const compLink = item.querySelector('a[href*="/companies/"]');
+        if (compLink) company = compLink.textContent.trim();
+
+        const roleMatch = text.match(/\b(director|officer|secretary|manager|agent|trustee)\b/i);
+        const position = roleMatch ? roleMatch[0] : '';
+
+        blocks.push({ name, subtitle: position, company, rawText: 'Name: ' + name + (company ? ' | Company: ' + company : '') + ' | Raw: ' + text.replace(/\n/g, ' ').slice(0, 400), type: 'opencorporates_officer', source: 'opencorporates' });
+      }
+      console.log('[Data Bunker] OC officers fallback (list):', blocks.length);
+    }
+  }
+
+  if (blocks.length === 0) return gatherGeneric();
+  console.log('[Data Bunker] gatherOpenCorporatesOfficers() TOTAL:', blocks.length);
+  return blocks;
+}
+
+// ── OpenCorporates Pagination Helpers ─────────────────────────────────────────
+function ocTotalResults() {
+  // OC shows "Found 2,911 companies" or "Found 2,729,279 officers" near the top.
+  // Only match the "Found N" pattern to avoid sidebar/marketing text.
+  const bodyText = document.body.innerText || '';
+  const m = bodyText.match(/found\s+([\d,]+)\s+(?:companies?|officers?|records?|results?)/i);
+  if (m) {
+    const n = parseInt(m[1].replace(/,/g, ''));
+    if (n > 0) return n;
+  }
+  return 0;
+}
+
+function ocCurrentPage() {
+  const m = location.search.match(/[?&]page=(\d+)/);
+  return m ? parseInt(m[1]) : 1;
+}
+
+function ocBuildNextPageUrl() {
+  if (!/opencorporates\.com\/(companies|officers|corporate_groupings)/.test(location.href)) return '';
+  const url = new URL(location.href);
+  url.searchParams.set('page', String(ocCurrentPage() + 1));
+  return url.toString();
+}
+
+// ── OpenCorporates Auto-Scraper ────────────────────────────────────────────────
+// OC is server-rendered: each page is a full page load.
+// Strategy:
+//   1. Wait for DOM ready (already is when content.js fires)
+//   2. Extract companies from current page
+//   3. Save to backend — WAIT for confirmation before navigating
+//   4. Only navigate if save succeeded; on failure, stop and report
+//   5. Background.js detects the OC URL reload and calls START_AUTO again
+async function runAutoOpenCorporates() {
+  isActive = true; stopFlag = false; navPending = false;
+  const MAX_PAGES = 200;
+
+  // Read persistent counters (survive page reloads via storage)
+  const stored = await chrome.storage.local.get('scraperStats').catch(() => ({}));
+  const prev = stored?.scraperStats || {};
+  let pages = (prev.status === 'running') ? (prev.pagesProcessed || 0) : 0;
+  let saved  = (prev.status === 'running') ? (prev.totalSaved    || 0) : 0;
+
+  chrome.runtime.sendMessage({ type: 'SCRAPING_STARTED' }).catch(() => {});
+
+  const pn = ocCurrentPage();
+  console.log('[Data Bunker] runAutoOpenCorporates() — page', pn, '— prev saved:', saved);
+
+  function done() {
+    isActive = false;
+    chrome.storage.local.remove('ocConsecutiveEmpty').catch(() => {});
+    chrome.storage.local.set({ scraperStats: { status: 'done', pagesProcessed: pages, totalSaved: saved, lastUpdate: Date.now() } }).catch(() => {});
+    chrome.runtime.sendMessage({ type: 'SCRAPING_DONE', data: { pagesProcessed: pages, totalSaved: saved } }).catch(() => {});
+  }
+
+  function finish() {
+    isActive = false;
+    chrome.storage.local.remove(['pendingAutoStart', 'pendingTabId', 'ocConsecutiveEmpty']).catch(() => {});
+    chrome.storage.local.set({ scraperStats: { status: 'idle', pagesProcessed: pages, totalSaved: saved, lastUpdate: Date.now() } }).catch(() => {});
+    chrome.runtime.sendMessage({ type: 'SCRAPING_DONE', data: { pagesProcessed: pages, totalSaved: saved } }).catch(() => {});
+  }
+
+  async function navigateToNext(nextUrl) {
+    const delay = 2500 + Math.random() * 2500;
+    console.log('[Data Bunker] OC — waiting', Math.round(delay / 1000) + 's before next page');
+    await sleep(delay);
+    if (stopFlag) { finish(); return; }
+    navPending = true;
+    await chrome.storage.local.set({
+      scraperStats: { status: 'running', pagesProcessed: pages, totalSaved: saved, pageNum: pn, totalResults: ocTotalResults(), lastUpdate: Date.now() },
+      pendingAutoStart: true,
+    }).catch(() => {});
+    console.log('[Data Bunker] OC — navigating to:', nextUrl);
+    try { chrome.runtime.sendMessage({ type: 'NAV_TO_URL', url: nextUrl }).catch(() => {}); } catch {}
+    setTimeout(() => { if (navPending) location.href = nextUrl; }, 1000);
+  }
+
+  try {
+    if (pages >= MAX_PAGES) { console.log('[Data Bunker] OC — reached MAX_PAGES limit'); done(); return; }
+
+    // --- Step 1: Scroll to trigger lazy content ---
+    await quickScroll();
+    if (stopFlag) { finish(); return; }
+    await sleep(400 + Math.random() * 300);
+    if (stopFlag) { finish(); return; }
+
+    // --- Step 2: Gather blocks ---
+    const blocks = gatherOpenCorporates();
+    pageLeads = blocks;
+    const total = ocTotalResults();
+    console.log('[Data Bunker] OC page', pn, '— gathered', blocks.length, 'blocks, total results:', total);
+    progress({ pagesProcessed: pages, totalSaved: saved, pageNum: pn, totalResults: total, detectedThisPage: blocks.length });
+
+    if (blocks.length === 0) {
+      // Don't give up on empty page — could be a layout mismatch or captcha page.
+      // Track consecutive empty pages; stop after 3 in a row.
+      const stored2 = await chrome.storage.local.get('ocConsecutiveEmpty').catch(() => ({}));
+      const emptyRun = ((stored2?.ocConsecutiveEmpty) || 0) + 1;
+      await chrome.storage.local.set({ ocConsecutiveEmpty: emptyRun }).catch(() => {});
+      if (emptyRun >= 3) {
+        console.log('[Data Bunker] OC page', pn, '— 0 blocks for', emptyRun, 'consecutive pages. Stopping.');
+        done();
+        return;
+      }
+      console.log('[Data Bunker] OC page', pn, '— 0 blocks, advancing to next page (empty run:', emptyRun, ')');
+      const nextUrl = ocBuildNextPageUrl();
+      if (!nextUrl) { done(); return; }
+      await navigateToNext(nextUrl);
+      return;
+    }
+    // Reset consecutive empty counter on successful extraction
+    await chrome.storage.local.remove('ocConsecutiveEmpty').catch(() => {});
+
+    // --- Step 3: Save to backend (MUST succeed before navigating) ---
+    let pageSaved = 0;
+    let saveOk = false;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const r = await fetch(API + '/api/scraper/leads', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ blocks, url: location.href, strategy: 'opencorporates', source: 'opencorporates_auto' }),
+          signal: AbortSignal.timeout(60000)
+        });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const d = await r.json();
+        pageSaved = (d.saved || 0) + (d.updated || 0);
+        saved += pageSaved;
+        pages++;
+        saveOk = true;
+        console.log('[Data Bunker] OC page', pn, '\u2705 saved', pageSaved, '(running total:', saved, ')');
+        progress({ pagesProcessed: pages, totalSaved: saved, pageNum: pn, totalResults: total, pageSaved });
+        break;
+      } catch (e) {
+        console.error('[Data Bunker] OC save attempt', attempt, 'failed:', e.message);
+        if (attempt < 3) await sleep(3000);
+      }
+    }
+
+    if (!saveOk) {
+      console.error('[Data Bunker] OC — all 3 save attempts failed. Stopping.');
+      done();
+      return;
+    }
+
+    if (stopFlag) { finish(); return; }
+
+    // --- Step 4: Check if there are more pages ---
+    const nextUrl = ocBuildNextPageUrl();
+    if (!nextUrl) { done(); return; }
+
+    // End detection: no next link AND few results on this page
+    const nextLink = document.querySelector('a[rel="next"], a[href*="page=' + (pn + 1) + '"]');
+    if (!nextLink && blocks.length < 5 && pn > 1) {
+      console.log('[Data Bunker] OC — no next link and few results, last page.');
+      done();
+      return;
+    }
+
+    // --- Step 5: Navigate to next page ---
+    await navigateToNext(nextUrl);
+
+  } finally {
+    if (!navPending) { isActive = false; }
+  }
+}
+
+
+// ── Generic Auto-Scraper — works on any site with a "Next" button ─────────────
+// Used by the "Other" tab. Scrapes the current page, saves, then tries to click
+// a "Next page" button. Stops when no Next button is found or blocks dry up.
+async function runAutoGeneric() {
+  isActive = true; stopFlag = false;
+  chrome.runtime.sendMessage({ type: 'SCRAPING_STARTED' }).catch(() => {});
+
+  let pages = 0, saved = 0;
+  const MAX_PAGES = 100;
+  const seenKeys = new Set();
+
+  try {
+    while (!stopFlag && pages < MAX_PAGES) {
+      pages++;
+      console.log('[Data Bunker] runAutoGeneric() — page', pages);
+
+      await quickScroll();
+      if (stopFlag) break;
+      await sleep(500);
+      if (stopFlag) break;
+
+      const blocks = await gatherBlocks();
+      const newBlocks = blocks.filter(b => {
+        const k = (b.name || b.rawText || '').slice(0, 80);
+        if (!k || seenKeys.has(k)) return false;
+        seenKeys.add(k); return true;
+      });
+      pageLeads = blocks;
+      progress({ pagesProcessed: pages, totalSaved: saved, pageNum: pages, detectedThisPage: blocks.length });
+
+      if (newBlocks.length > 0) {
+        try {
+          const r = await fetch(API + '/api/scraper/leads', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ blocks: newBlocks, url: location.href, strategy: getStrategy(), source: 'generic_auto' }),
+            signal: AbortSignal.timeout(60000)
+          });
+          const d = await r.json();
+          const ps = (d.saved || 0) + (d.updated || 0);
+          saved += ps;
+          console.log('[Data Bunker] Generic page', pages, '✅ saved', ps, '(total:', saved, ')');
+          progress({ pagesProcessed: pages, totalSaved: saved, pageNum: pages, pageSaved: ps });
+        } catch (e) {
+          console.error('[Data Bunker] Generic save failed:', e.message);
+        }
+      }
+
+      if (stopFlag) break;
+
+      // Try to find and click a "Next" button
+      const nextBtn = findGenericNextButton();
+      if (!nextBtn) { console.log('[Data Bunker] Generic — no Next button found, done.'); break; }
+      const prevUrl = location.href;
+      nextBtn.click();
+      // Wait up to 8s for URL or DOM to change
+      const changed = await waitFor(() => location.href !== prevUrl || document.body.scrollHeight > 200, 8000);
+      if (!changed) { console.log('[Data Bunker] Generic — Next click did not navigate, done.'); break; }
+      await sleep(1200 + Math.random() * 800);
+    }
+  } finally { isActive = false; }
+
+  console.log('[Data Bunker] 🏁 Generic auto done — pages:', pages, 'saved:', saved);
+  chrome.runtime.sendMessage({ type: 'SCRAPING_DONE', data: { pagesProcessed: pages, totalSaved: saved } }).catch(() => {});
+}
+
+function findGenericNextButton() {
+  // Priority: aria-label, rel, text content
+  const queries = [
+    '[aria-label*="next" i]:not([disabled])',
+    '[rel="next"]',
+    'a[href*="page="]:last-of-type',
+    '.pagination .next a',
+    '.paginering .next a',
+    'nav a[href*="page"]',
+  ];
+  for (const q of queries) {
+    try { const el = document.querySelector(q); if (el) return el; } catch {}
+  }
+  // Fallback: any button/link whose text includes "next" or "→" or ">"
+  const all = [...document.querySelectorAll('a, button')];
+  for (const el of all) {
+    const t = (el.textContent || el.getAttribute('aria-label') || '').trim().toLowerCase();
+    if (/^(next|next page|следующая|下一页|›|»|→|>)$/.test(t) && !el.disabled && el.offsetParent !== null) return el;
+  }
+  return null;
+}
 
 // ── Google Maps ───────────────────────────────────────────────────────────────
 function gatherMaps() {
@@ -1424,4 +2178,68 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 function waitFor(fn, ms = 10000) { return new Promise(res => { const t = Date.now(), id = setInterval(() => { if (fn()) { clearInterval(id); res(true); } else if (Date.now() - t > ms) { clearInterval(id); res(false); } }, 200); }); }
 function waitStable(stableMs = 1500, timeout = 10000) { return new Promise(res => { let prev = 0, since = Date.now(); const t = Date.now(), id = setInterval(() => { const c = document.querySelectorAll('a[href*="/in/"], tr, li, article').length; if (c !== prev) { prev = c; since = Date.now(); } if ((c > 0 && Date.now() - since >= stableMs) || Date.now() - t > timeout) { clearInterval(id); res(c); } }, 300); }); }
 
-console.log('%c[Data Bunker v5] Strategy: ' + getStrategy(), 'color:#7c3aed;font-weight:bold');
+// ── Floating Overlay — small draggable panel showing scraping progress ────────
+(function initOverlay() {
+  if (document.getElementById('db-overlay')) return;
+  const strategy = getStrategy();
+  if (strategy === 'generic' && !location.hostname.includes('linkedin') && !location.hostname.includes('apollo') && !location.hostname.includes('opencorporates')) return;
+
+  const overlay = document.createElement('div');
+  overlay.id = 'db-overlay';
+  overlay.innerHTML = `
+    <div id="db-ov-header" style="cursor:grab;display:flex;align-items:center;gap:6px;margin-bottom:6px;">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="18" height="18" rx="4" stroke="url(#dbg)" stroke-width="2"/><path d="M8 12h8M12 8v8" stroke="url(#dbg)" stroke-width="2" stroke-linecap="round"/><defs><linearGradient id="dbg" x1="3" y1="3" x2="21" y2="21"><stop stop-color="#818cf8"/><stop offset="1" stop-color="#06b6d4"/></linearGradient></defs></svg>
+      <span style="font-weight:700;font-size:11px;background:linear-gradient(135deg,#818cf8,#06b6d4);-webkit-background-clip:text;-webkit-text-fill-color:transparent">Data Banker</span>
+      <span id="db-ov-badge" style="margin-left:auto;font-size:9px;padding:1px 6px;border-radius:4px;background:rgba(129,140,248,0.15);color:#818cf8;font-weight:700">IDLE</span>
+    </div>
+    <div id="db-ov-status" style="font-size:11px;color:#94a3b8;margin-bottom:4px">Ready</div>
+    <div style="display:flex;gap:4px;">
+      <div style="text-align:center;flex:1"><div id="db-ov-saved" style="font-size:16px;font-weight:700;color:#818cf8">0</div><div style="font-size:8px;color:#64748b;letter-spacing:0.5px">SAVED</div></div>
+      <div style="text-align:center;flex:1"><div id="db-ov-page" style="font-size:16px;font-weight:700;color:#e6edf3">0</div><div style="font-size:8px;color:#64748b;letter-spacing:0.5px">PAGE</div></div>
+    </div>
+  `;
+  overlay.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:2147483647;width:180px;padding:10px 12px;background:rgba(11,15,20,0.92);backdrop-filter:blur(16px);border:1px solid rgba(255,255,255,0.08);border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,0.5);font-family:Inter,-apple-system,BlinkMacSystemFont,system-ui,sans-serif;color:#e6edf3;transition:opacity 0.3s;';
+  document.body.appendChild(overlay);
+
+  // Draggable
+  const header = overlay.querySelector('#db-ov-header');
+  let isDrag = false, ox = 0, oy = 0;
+  header.addEventListener('mousedown', e => { isDrag = true; ox = e.clientX - overlay.offsetLeft; oy = e.clientY - overlay.offsetTop; header.style.cursor = 'grabbing'; });
+  document.addEventListener('mousemove', e => { if (!isDrag) return; overlay.style.left = (e.clientX - ox) + 'px'; overlay.style.top = (e.clientY - oy) + 'px'; overlay.style.right = 'auto'; overlay.style.bottom = 'auto'; });
+  document.addEventListener('mouseup', () => { isDrag = false; header.style.cursor = 'grab'; });
+
+  // Poll scraper stats and update overlay
+  setInterval(async () => {
+    try {
+      const { scraperStats } = await chrome.storage.local.get('scraperStats');
+      if (!scraperStats) return;
+      const badge = overlay.querySelector('#db-ov-badge');
+      const statusEl = overlay.querySelector('#db-ov-status');
+      const savedEl = overlay.querySelector('#db-ov-saved');
+      const pageEl = overlay.querySelector('#db-ov-page');
+      savedEl.textContent = (scraperStats.totalSaved || 0).toLocaleString();
+      pageEl.textContent = scraperStats.pagesProcessed || scraperStats.pageNum || 0;
+      if (scraperStats.status === 'running') {
+        badge.textContent = 'SCRAPING';
+        badge.style.background = 'rgba(45,212,191,0.15)';
+        badge.style.color = '#2dd4bf';
+        statusEl.textContent = (scraperStats.totalSaved || 0) + ' records found';
+        statusEl.style.color = '#2dd4bf';
+      } else if (scraperStats.status === 'done') {
+        badge.textContent = 'DONE';
+        badge.style.background = 'rgba(52,211,153,0.15)';
+        badge.style.color = '#34d399';
+        statusEl.textContent = 'Completed — ' + (scraperStats.totalSaved || 0) + ' saved';
+        statusEl.style.color = '#34d399';
+      } else {
+        badge.textContent = 'IDLE';
+        badge.style.background = 'rgba(129,140,248,0.15)';
+        badge.style.color = '#818cf8';
+        statusEl.textContent = 'Ready';
+        statusEl.style.color = '#94a3b8';
+      }
+    } catch(e) {}
+  }, 1000);
+})();
+
+console.log('%c[Data Banker v7] Strategy: ' + getStrategy(), 'color:#818cf8;font-weight:bold');

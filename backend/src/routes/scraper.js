@@ -706,12 +706,12 @@ router.post('/leads', async (req, res) => {
               (first_name, last_name, job_title, email, phone_number, country, city,
                linked_account_id, seniority, industry_hint, email_format_guess,
                data_source, verified, confidence_score)
-            SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,true,75
+            SELECT $1::varchar,$2::varchar,$3::varchar,$4::varchar,$5::varchar,$6::varchar,$7::varchar,$8::int,$9::varchar,$10::varchar,$11::varchar,$12::varchar,true,75
             WHERE NOT EXISTS (
               SELECT 1 FROM contacts
-              WHERE LOWER(first_name) = LOWER($1)
-                AND LOWER(last_name)  = LOWER($2)
-                AND linked_account_id = $8
+              WHERE LOWER(first_name) = LOWER($1::varchar)
+                AND LOWER(last_name)  = LOWER($2::varchar)
+                AND linked_account_id = $8::int
             )
             RETURNING contact_id
           `, [
@@ -728,15 +728,15 @@ router.post('/leads', async (req, res) => {
             // Already exists — try to update email/phone/title if we now have better data
             await client.query(`
               UPDATE contacts SET
-                job_title    = COALESCE(NULLIF($3,''), job_title),
-                email        = COALESCE(NULLIF($4,''), email),
-                phone_number = COALESCE(NULLIF($5,''), phone_number),
-                city         = COALESCE(NULLIF($6,''), city),
-                country      = COALESCE(NULLIF($7,''), country),
-                industry_hint= COALESCE(NULLIF($8,''), industry_hint)
-              WHERE LOWER(first_name) = LOWER($1)
-                AND LOWER(last_name)  = LOWER($2)
-                AND linked_account_id = $9
+                job_title    = COALESCE(NULLIF($3::varchar,''), job_title),
+                email        = COALESCE(NULLIF($4::varchar,''), email),
+                phone_number = COALESCE(NULLIF($5::varchar,''), phone_number),
+                city         = COALESCE(NULLIF($6::varchar,''), city),
+                country      = COALESCE(NULLIF($7::varchar,''), country),
+                industry_hint= COALESCE(NULLIF($8::varchar,''), industry_hint)
+              WHERE LOWER(first_name) = LOWER($1::varchar)
+                AND LOWER(last_name)  = LOWER($2::varchar)
+                AND linked_account_id = $9::int
             `, [
               lead.firstName, lead.lastName,
               lead.jobTitle || null, lead.email || null, lead.phone || null,

@@ -38,7 +38,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   // Accept either exact tab match, or any LinkedIn search tab when pendingTabId is missing
   // (pendingTabId may be missing if content.js set pendingAutoStart directly as a safety net)
   if (pendingTabId && pendingTabId !== tabId) return;
-  if (!pendingTabId && !(tab.url || '').match(/linkedin\.com\/(search\/results|sales\/search)|apollo\.io/)) return;
+  if (!pendingTabId && !(tab.url || '').match(/linkedin\.com\/(search\/results|sales\/search)|apollo\.io|opencorporates\.com/)) return;
 
   console.log('[bg] Tab', tabId, 'loaded — restarting auto-scraper');
   await chrome.storage.local.remove(['pendingAutoStart', 'pendingTabId']);

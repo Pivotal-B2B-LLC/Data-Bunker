@@ -1,8 +1,13 @@
 {
   "manifest_version": 3,
-  "name": "Data Bunker — B2B Lead Scraper",
-  "version": "5.0.0",
-  "description": "Universal B2B lead extraction. LinkedIn, Apollo, Google Maps, and any directory.",
+  "name": "Data Banker — B2B Lead Scraper",
+  "version": "7.0.0",
+  "description": "Premium B2B lead extraction. LinkedIn, Apollo, OpenCorporates, and any directory.",
+  "icons": {
+    "16": "icon-16.png",
+    "48": "icon-48.png",
+    "128": "icon-128.png"
+  },
   "permissions": [
     "activeTab",
     "storage",
@@ -15,7 +20,12 @@
   ],
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Data Bunker Scraper"
+    "default_title": "Data Bunker Scraper",
+    "default_icons": {
+      "16": "icon-16.png",
+      "24": "icon-24.png",
+      "32": "icon-32.png"
+    }
   },
   "background": {
     "service_worker": "background.js"
